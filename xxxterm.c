@@ -240,6 +240,39 @@ valid_url_type(char *url)
 	return (1);
 }
 
+/* http://www.iana.org/domains/root/db */
+const char *tlds[] = { ".ad",".ae",".aero",".af",".ag",".ai",".al",".am",".an",".ao",".aq",".ar",".arpa",".as",".asia",".at",".au",".aw",".ax",".az",".ba",".bb",".bd",".be",".bf",".bg",".bh",".bi",".biz",".bj",".bl",".bm",".bn",".bo",".br",".bs",".bt",".bv",".bw",".by",".bz",".ca",".cat",".cc",".cd",".cf",".cg",".ch",".ci",".ck",".cl",".cm",".cn",".co",".com",".coop",".cr",".cu",".cv",".cx",".cy",".cz",".de",".dj",".dk",".dm",".do",".dz",".ec",".edu",".ee",".eg",".eh",".er",".es",".et",".eu",".fi",".fj",".fk",".fm",".fo",".fr",".ga",".gb",".gd",".ge",".gf",".gg",".gh",".gi",".gl",".gm",".gn",".gov",".gp",".gq",".gr",".gs",".gt",".gu",".gw",".gy",".hk",".hm",".hn",".hr",".ht",".hu",".id",".ie",".il",".im",".in",".info",".int",".io",".iq",".ir",".is",".it",".je",".jm",".jo",".jobs",".jp",".ke",".kg",".kh",".ki",".km",".kn",".kp",".kr",".kw",".ky",".kz",".la",".lb",".lc",".li",".lk",".lr",".ls",".lt",".lu",".lv",".ly",".ma",".mc",".md",".me",".mf",".mg",".mh",".mil",".mk",".ml",".mm",".mn",".mo",".mobi",".mp",".mq",".mr",".ms",".mt",".mu",".museum",".mv",".mw",".mx",".my",".mz",".na",".name",".nc",".ne",".net",".nf",".ng",".ni",".nl",".no",".np",".nr",".nu",".nz",".om",".org",".pa",".pe",".pf",".pg",".ph",".pk",".pl",".pm",".pn",".pr",".pro",".ps",".pt",".pw",".py",".qa",".re",".ro",".rs",".ru",".rw",".sa",".sb",".sc",".sd",".se",".sg",".sh",".si",".sj",".sk",".sl",".sm",".sn",".so",".sr",".st",".su",".sv",".sy",".sz",".tc",".td",".tel",".tf",".tg",".th",".tj",".tk",".tl",".tm",".tn",".to",".tp",".tr",".travel",".tt",".tv",".tw",".tz",".ua",".ug",".uk",".um",".us",".uy",".uz",".va",".vc",".ve",".vg",".vi",".vn",".vu",".wf",".ws",".xn--0zwm56d",".xn--11b5bs3a9aj6g",".xn--80akhbyknj4f",".xn--9t4b11yi5a",".xn--deba0ad",".xn--g6w251d",".xn--hgbk6aj7f53bba",".xn--hlcj6aya9esc7a",".xn--jxalpdlp",".xn--kgbechtv",".xn--mgbaam7a8h",".xn--mgberp4a5d4ar",".xn--p1ai",".xn--wgbh1c",".xn--zckzah",".ye",".yt",".za",".zm",".zw", NULL };
+
+int
+guess_domainname(char *input)
+{
+	char *str;
+	char *p;
+	int i, ret = 0;
+
+	if (!input)
+		return 0;
+
+	if (!valid_url_type(input))
+		return 1;
+
+	if ((str = strdup(input)) == NULL)
+		err(1, "strdup");
+	if ((p = strchr(str, '/')) != NULL)
+		*p = '\0';
+
+	for (i = 0; tlds[i]; i++) {
+		if ((p = strstr(str, tlds[i])) != NULL) {
+			if (strlen(p) == strlen(tlds[i])) {
+				ret = 1;
+				break;
+			}
+		}
+	}
+	free(str);
+	return ret;
+}
+
 char *
 guess_url_type(char *url_in)
 {
@@ -251,8 +284,11 @@ guess_url_type(char *url_in)
 		if (asprintf(&url_out, "file://%s", url_in) == -1)
 			err(1, "aprintf file");
 	} else {
-		/* guess http */
-		if (asprintf(&url_out, "http://%s", url_in) == -1)
+		/* guess search */
+		if (!guess_domainname(url_in)) {
+			if (asprintf(&url_out, search_string, url_in) == -1)
+				err(1, "asprintf search");
+		} else if (asprintf(&url_out, "http://%s", url_in) == -1) /* guess http */
 			err(1, "aprintf http");
 	}
 

@@ -200,6 +200,10 @@ int			read_only_cookies = 0; /* enable to not write cookies */
 int			enable_scripts = 0;
 int			enable_plugins = 0;
 int			default_font_size = 12;
+char			*default_font_family = NULL;
+char			*serif_font_family = NULL;
+char			*sans_serif_font_family = NULL;
+char			*monospace_font_family = NULL;
 char			*default_encoding = NULL;
 int			fancy_bar = 1;	/* fancy toolbar */
 
@@ -432,6 +436,14 @@ config_parse(char *filename)
 			enable_plugins = atoi(val);
 		else if (!strcmp(var, "default_font_size"))
 			default_font_size = atoi(val);
+		else if (!strcmp(var, "default_font_family"))
+			default_font_family = strdup(val);
+		else if (!strcmp(var, "serif_font_family"))
+			serif_font_family = strdup(val);
+		else if (!strcmp(var, "sans_serif_font_family"))
+			sans_serif_font_family = strdup(val);
+		else if (!strcmp(var, "monospace_font_family"))
+			monospace_font_family = strdup(val);
 		else if (!strcmp(var, "default_encoding"))
 			default_encoding = strdup(val);
 		else if (!strcmp(var, "fancy_bar"))
@@ -965,6 +977,10 @@ set(struct tab *t, struct karg *args)
 		mnprintf(&s, &l, "ctrl_click_focus\t= %d<br>", ctrl_click_focus);
 		mnprintf(&s, &l, "cookies_enabled\t\t= %d<br>", cookies_enabled);
 		mnprintf(&s, &l, "default_font_size\t= %d<br>", default_font_size);
+		mnprintf(&s, &l, "default_font_family\t= %d<br>", default_font_family);
+		mnprintf(&s, &l, "serif_font_family\t= %d<br>", serif_font_family);
+		mnprintf(&s, &l, "sans_serif_font_family\t= %d<br>", sans_serif_font_family);
+		mnprintf(&s, &l, "monospace_font_family\t= %d<br>", monospace_font_family);
 		mnprintf(&s, &l, "default_encoding\t= %s<br>", default_encoding);
 		mnprintf(&s, &l, "enable_plugins\t\t= %d<br>", enable_plugins);
 		mnprintf(&s, &l, "enable_scripts\t\t= %d<br>", enable_scripts);
@@ -1704,6 +1720,14 @@ setup_webkit(struct tab *t)
 	g_object_set((GObject *)t->settings,
 	    "enable-plugins", enable_plugins, NULL);
 	adjustfont_webkit(t, XT_FONT_SET);
+	g_object_set((GObject *)t->settings,
+	    "default-font-family", default_font_family, NULL);
+	g_object_set((GObject *)t->settings,
+	    "serif-font-family", serif_font_family, NULL);
+	g_object_set((GObject *)t->settings,
+	    "sans-serif-font-family", sans_serif_font_family, NULL);
+	g_object_set((GObject *)t->settings,
+	    "monospace-font-family", monospace_font_family, NULL);
 	g_object_set((GObject *)t->settings,
 	    "default-encoding", default_encoding, NULL);
 

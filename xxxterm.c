@@ -288,8 +288,16 @@ guess_url_type(char *url_in)
 		if (!guess_domainname(url_in)) {
 			if (asprintf(&url_out, search_string, url_in) == -1)
 				err(1, "asprintf search");
-		} else if (asprintf(&url_out, "http://%s", url_in) == -1) /* guess http */
-			err(1, "aprintf http");
+		} else {
+			char *p, *url;
+
+			if ((p = strdup(url_in)) == NULL)
+				err(1, "strdup http");
+			url = strtok(p, " \t");
+			if (asprintf(&url_out, "http://%s", url) == -1) /* guess http */
+				err(1, "aprintf http");
+			free(p);
+		}
 	}
 
 	if (url_out == NULL)

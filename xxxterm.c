@@ -265,6 +265,9 @@ guess_domainname(char *input)
 		err(1, "strdup");
 	if ((p = strchr(str, '/')) != NULL)
 		*p = '\0';
+	/* port? */
+	if ((p = strchr(str, ':')) != NULL)
+		*p = '\0';
 
 	for (i = 0; tlds[i]; i++) {
 		if ((p = strstr(str, tlds[i])) != NULL) {

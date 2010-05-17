@@ -200,6 +200,7 @@ int			read_only_cookies = 0; /* enable to not write cookies */
 int			enable_scripts = 0;
 int			enable_plugins = 0;
 int			default_font_size = 12;
+char			*default_encoding = NULL;
 int			fancy_bar = 1;	/* fancy toolbar */
 
 char			*home = "http://www.peereboom.us";
@@ -431,6 +432,8 @@ config_parse(char *filename)
 			enable_plugins = atoi(val);
 		else if (!strcmp(var, "default_font_size"))
 			default_font_size = atoi(val);
+		else if (!strcmp(var, "default_encoding"))
+			default_encoding = strdup(val);
 		else if (!strcmp(var, "fancy_bar"))
 			fancy_bar = atoi(val);
 		else if (!strcmp(var, "mime_type"))
@@ -962,6 +965,7 @@ set(struct tab *t, struct karg *args)
 		mnprintf(&s, &l, "ctrl_click_focus\t= %d<br>", ctrl_click_focus);
 		mnprintf(&s, &l, "cookies_enabled\t\t= %d<br>", cookies_enabled);
 		mnprintf(&s, &l, "default_font_size\t= %d<br>", default_font_size);
+		mnprintf(&s, &l, "default_encoding\t= %s<br>", default_encoding);
 		mnprintf(&s, &l, "enable_plugins\t\t= %d<br>", enable_plugins);
 		mnprintf(&s, &l, "enable_scripts\t\t= %d<br>", enable_scripts);
 		mnprintf(&s, &l, "fancy_bar\t\t= %d<br>", fancy_bar);
@@ -1700,6 +1704,8 @@ setup_webkit(struct tab *t)
 	g_object_set((GObject *)t->settings,
 	    "enable-plugins", enable_plugins, NULL);
 	adjustfont_webkit(t, XT_FONT_SET);
+	g_object_set((GObject *)t->settings,
+	    "default-encoding", default_encoding, NULL);
 
 	webkit_web_view_set_settings(t->wv, t->settings);
 }

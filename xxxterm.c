@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.87 2010/03/27 23:26:12 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.100 2010/08/10 22:24:41 marco Exp $ */
 /*
  * Copyright (c) 2010 Marco Peereboom <marco@peereboom.us>
  *
@@ -48,7 +48,7 @@
 #include <libsoup/soup.h>
 #include <JavaScriptCore/JavaScript.h>
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.87 2010/03/27 23:26:12 marco Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.100 2010/08/10 22:24:41 marco Exp $";
 
 #define XT_DEBUG
 /* #define XT_DEBUG */
@@ -144,10 +144,12 @@ struct karg {
 #define XT_MOVE_TOP		(4)
 #define XT_MOVE_PAGEDOWN	(5)
 #define XT_MOVE_PAGEUP		(6)
-#define XT_MOVE_LEFT		(7)
-#define XT_MOVE_FARLEFT		(8)
-#define XT_MOVE_RIGHT		(9)
-#define XT_MOVE_FARRIGHT	(10)
+#define XT_MOVE_HALFDOWN	(7)
+#define XT_MOVE_HALFUP		(8)
+#define XT_MOVE_LEFT		(9)
+#define XT_MOVE_FARLEFT		(10)
+#define XT_MOVE_RIGHT		(11)
+#define XT_MOVE_FARRIGHT	(12)
 
 #define XT_TAB_LAST		(-4)
 #define XT_TAB_FIRST		(-3)
@@ -190,6 +192,14 @@ struct mime_type {
 };
 TAILQ_HEAD(mime_type_list, mime_type);
 
+/* uri aliases */
+struct alias {
+	char			*a_name;;
+	char			*a_uri;
+	TAILQ_ENTRY(alias)	 entry;
+};
+TAILQ_HEAD(alias_list, alias);
+
 /* settings */
 int			showtabs = 1;	/* show tabs on notebook */
 int			showurl = 1;	/* show url toolbar on notebook */
@@ -218,6 +228,7 @@ SoupSession		*session;
 SoupCookieJar		*cookiejar;
 
 struct mime_type_list	mtl;
+struct alias_list	aliases;
 
 /* protos */
 void			create_new_tab(char *, int);
@@ -282,10 +293,42 @@ guess_domainname(char *input)
 }
 
 char *
+match_alias(char *url_in)
+{
+	struct alias		*a;
+	char			*arg;
+	char			*url_out = NULL;
+
+	arg = url_in;
+	if (strsep(&arg, " \t") == NULL)
+		errx(1, "match_alias: NULL URL");
+
+	TAILQ_FOREACH(a, &aliases, entry) {
+		if (!strcmp(url_in, a->a_name))
+			break;
+	}
+
+	if (a != NULL) {
+		DNPRINTF(XT_D_URL, "match_alias: matched alias %s\n",
+			a->a_name);
+		if (arg != NULL)
+			asprintf(&url_out, a->a_uri, arg);
+		else
+			url_out = strdup(a->a_uri);
+	}
+
+	return (url_out);
+}
+
+char *
 guess_url_type(char *url_in)
 {
 	struct stat		sb;
 	char			*url_out = NULL;
+
+	url_out = match_alias(url_in);
+	if (url_out != NULL)
+		return (url_out);
 
 	/* XXX not sure about this heuristic */
 	if (stat(url_in, &sb) == 0) {
@@ -314,6 +357,39 @@ guess_url_type(char *url_in)
 	DNPRINTF(XT_D_URL, "guess_url_type: guessed %s\n", url_out);
 
 	return (url_out);
+}
+
+void
+add_alias(char *line)
+{
+	char			*l, *alias;
+	struct alias		*a;
+
+	if (line == NULL)
+		errx(1, "add_alias");
+	l = line;
+
+	a = malloc(sizeof(*a));
+	if (a == NULL)
+		err(1, "add_alias: malloc");
+
+	if ((alias = strsep(&l, " \t,")) == NULL || l == NULL)
+		errx(1, "add_alias: incomplete alias definition");
+
+	if (strlen(alias) == 0 || strlen(l) == 0)
+		errx(1, "add_alias: invalid alias definition");
+
+	a->a_name = strdup(alias);
+	if (a->a_name == NULL)
+		err(1, "add_alias: malloc alias");
+
+	a->a_uri = strdup(l);
+	if (a->a_uri == NULL)
+		err(1, "add_alias: malloc uri");
+
+	DNPRINTF(XT_D_CONFIG, "add_alias: %s for %s\n", a->a_name, a->a_uri);
+
+	TAILQ_INSERT_TAIL(&aliases, a, entry);
 }
 
 void
@@ -387,11 +463,12 @@ config_parse(char *filename)
 {
 	FILE			*config;
 	char			*line, *cp, *var, *val;
-	size_t			 len, lineno = 0;
+	size_t			len, lineno = 0;
 
 	DNPRINTF(XT_D_CONFIG, "config_parse: filename %s\n", filename);
 
 	TAILQ_INIT(&mtl);
+	TAILQ_INIT(&aliases);
 
 	if (filename == NULL)
 		return;
@@ -403,7 +480,7 @@ config_parse(char *filename)
 
 	for (;;) {
 		if ((line = fparseln(config, &len, &lineno, NULL, 0)) == NULL)
-			if (feof(config))
+			if (feof(config) || ferror(config))
 				break;
 
 		cp = line;
@@ -453,6 +530,8 @@ config_parse(char *filename)
 			fancy_bar = atoi(val);
 		else if (!strcmp(var, "mime_type"))
 			add_mime_type(val);
+		else if (!strcmp(var, "alias"))
+			add_alias(val);
 		else if (!strcmp(var, "http_proxy")) {
 			if (http_proxy)
 				free(http_proxy);
@@ -550,13 +629,16 @@ favorites(struct tab *t, struct karg *args)
 
 	for (i = 1;;) {
 		if ((title = fparseln(f, &len, &lineno, NULL, 0)) == NULL)
-			if (feof(f))
+			if (feof(f) || ferror(f))
 				break;
-		if (strlen(title) == 0)
+		if (len == 0) {
+			free(title);
+			title = NULL;
 			continue;
+		}
 
 		if ((uri = fparseln(f, &len, &lineno, NULL, 0)) == NULL)
-			if (feof(f)) {
+			if (feof(f) || ferror(f)) {
 				failed = 1;
 				break;
 			}
@@ -599,6 +681,8 @@ favadd(struct tab *t, struct karg *args)
 {
 	char			file[PATH_MAX];
 	FILE			*f;
+	char			*line = NULL;
+	size_t			urilen, linelen;
 	WebKitWebFrame		*frame;
 	const gchar		*uri, *title;
 
@@ -611,8 +695,6 @@ favadd(struct tab *t, struct karg *args)
 		warn("favorites");
 		return (1);
 	}
-	if (fseeko(f, 0, SEEK_END) == -1)
-		err(1, "fseeko");
 
 	title = webkit_web_view_get_title(t->wv);
 	frame = webkit_web_view_get_main_frame(t->wv);
@@ -629,8 +711,20 @@ favadd(struct tab *t, struct karg *args)
 		goto done;
 	}
 
+	urilen = strlen(uri);
+
+	while (!feof(f)) {
+		line = fparseln(f, &linelen, NULL, NULL, 0);
+		if (linelen == urilen && !strcmp(line, uri))
+			goto done;
+		free(line);
+		line = NULL;
+	}
+
 	fprintf(f, "\n%s\n%s", title, uri);
 done:
+	if (line)
+		free(line);
 	fclose(f);
 
 	return (0);
@@ -669,6 +763,8 @@ move(struct tab *t, struct karg *args)
 	case XT_MOVE_TOP:
 	case XT_MOVE_PAGEDOWN:
 	case XT_MOVE_PAGEUP:
+	case XT_MOVE_HALFDOWN:
+	case XT_MOVE_HALFUP:
 		adjust = t->adjust_v;
 		break;
 	default:
@@ -686,7 +782,7 @@ move(struct tab *t, struct karg *args)
 
 	DNPRINTF(XT_D_MOVE, "move: opcode %d %s pos %f ps %f upper %f lower %f "
 	    "max %f si %f pi %f\n",
-	    args->i, adjust == t->adjust_h ? "horizontal" : "vertical", 
+	    args->i, adjust == t->adjust_h ? "horizontal" : "vertical",
 	    pos, ps, upper, lower, max, si, pi);
 
 	switch (args->i) {
@@ -714,6 +810,14 @@ move(struct tab *t, struct karg *args)
 		break;
 	case XT_MOVE_PAGEUP:
 		pos -= pi;
+		gtk_adjustment_set_value(adjust, MAX(pos, lower));
+		break;
+	case XT_MOVE_HALFDOWN:
+		pos += pi / 2;
+		gtk_adjustment_set_value(adjust, MIN(pos, max));
+		break;
+	case XT_MOVE_HALFUP:
+		pos -= pi / 2;
 		gtk_adjustment_set_value(adjust, MAX(pos, lower));
 		break;
 	default:
@@ -1025,7 +1129,7 @@ set(struct tab *t, struct karg *args)
 
 		enable_scripts = x;
 		g_object_set((GObject *)t->settings,
-		    "enable-scripts", enable_scripts, NULL);
+		    "enable-scripts", enable_scripts, (char *)NULL);
 		webkit_web_view_set_settings(t->wv, t->settings);
 	}
 
@@ -1079,9 +1183,11 @@ struct key {
 	{ 0,			GDK_g,	GDK_g,		move,		{.i = XT_MOVE_TOP} }, /* XXX make this work */
 	{ 0,			0,	GDK_space,	move,		{.i = XT_MOVE_PAGEDOWN} },
 	{ GDK_CONTROL_MASK,	0,	GDK_f,		move,		{.i = XT_MOVE_PAGEDOWN} },
+	{ GDK_CONTROL_MASK,	0,	GDK_d,		move,		{.i = XT_MOVE_HALFDOWN} },
 	{ 0,			0,	GDK_Page_Down,	move,		{.i = XT_MOVE_PAGEDOWN} },
 	{ 0,			0,	GDK_Page_Up,	move,		{.i = XT_MOVE_PAGEUP} },
 	{ GDK_CONTROL_MASK,	0,	GDK_b,		move,		{.i = XT_MOVE_PAGEUP} },
+	{ GDK_CONTROL_MASK,	0,	GDK_u,		move,		{.i = XT_MOVE_HALFUP} },
 	/* horizontal movement */
 	{ 0,			0,	GDK_l,		move,		{.i = XT_MOVE_RIGHT} },
 	{ 0,			0,	GDK_Right,	move,		{.i = XT_MOVE_RIGHT} },
@@ -1107,7 +1213,7 @@ struct key {
 	{ GDK_CONTROL_MASK|GDK_SHIFT_MASK, 0, GDK_greater, movetab,	{.i = XT_TAB_LAST} },
 	{ GDK_CONTROL_MASK,	0,	GDK_minus,	resizetab,	{.i = -1} },
 	{ GDK_CONTROL_MASK|GDK_SHIFT_MASK, 0, GDK_plus,	resizetab,	{.i = 1} },
-	{ GDK_CONTROL_MASK, 	0, 	GDK_equal,	resizetab,	{.i = 1} },
+	{ GDK_CONTROL_MASK,	0,	GDK_equal,	resizetab,	{.i = 1} },
 };
 
 struct cmd {
@@ -1124,6 +1230,8 @@ struct cmd {
 	/* favorites */
 	{ "fav",		0,	favorites,		{0} },
 	{ "favadd",		0,	favadd,			{0} },
+
+	{ "1",			0,	move,			{.i = XT_MOVE_TOP} },
 
 	/* tabs */
 	{ "o",			1,	tabaction,		{.i = XT_TAB_OPEN} },
@@ -1179,6 +1287,8 @@ activate_uri_entry_cb(GtkWidget* entry, struct tab *t)
 
 	if (uri == NULL)
 		errx(1, "uri");
+
+	uri += strspn(uri, "\t ");
 
 	if (valid_url_type((char *)uri)) {
 		newuri = guess_url_type((char *)uri);
@@ -1310,7 +1420,8 @@ webview_npd_cb(WebKitWebView *wv, WebKitWebFrame *wf,
 	if (t == NULL)
 		errx(1, "webview_npd_cb");
 
-	DNPRINTF(XT_D_NAV, "webview_npd_cb: %s\n",
+	DNPRINTF(XT_D_NAV, "webview_npd_cb: ctrl_click %d %s\n",
+	    t->ctrl_click,
 	    webkit_network_request_get_uri(request));
 
 	uri = (char *)webkit_network_request_get_uri(request);
@@ -1342,13 +1453,19 @@ webview_event_cb(GtkWidget *w, GdkEventButton *e, struct tab *t)
 {
 	/* we can not eat the event without throwing gtk off so defer it */
 
+	/* catch middle click */
+	if (e->type == GDK_BUTTON_RELEASE && e->button == 2) {
+		t->ctrl_click = 1;
+		goto done;
+	}
+
 	/* catch ctrl click */
-	if (e->type == GDK_BUTTON_RELEASE && 
+	if (e->type == GDK_BUTTON_RELEASE &&
 	    CLEAN(e->state) == GDK_CONTROL_MASK)
 		t->ctrl_click = 1;
 	else
 		t->ctrl_click = 0;
-
+done:
 	return (XT_CB_PASSTHROUGH);
 }
 
@@ -1427,11 +1544,10 @@ webview_download_cb(WebKitWebView *wv, WebKitDownload *download, struct tab *t)
 	    t->tab_id, filename, uri);
 
 	webkit_download_set_destination_uri(download, uri);
+	webkit_download_start(download);
 
 	if (uri)
 		free(uri);
-
-	webkit_download_start(download);
 
 	return (TRUE); /* start download */
 }
@@ -1717,11 +1833,11 @@ void
 setup_webkit(struct tab *t)
 {
 	g_object_set((GObject *)t->settings,
-	    "user-agent", t->user_agent, NULL);
+	    "user-agent", t->user_agent, (char *)NULL);
 	g_object_set((GObject *)t->settings,
-	    "enable-scripts", enable_scripts, NULL);
+	    "enable-scripts", enable_scripts, (char *)NULL);
 	g_object_set((GObject *)t->settings,
-	    "enable-plugins", enable_plugins, NULL);
+	    "enable-plugins", enable_plugins, (char *)NULL);
 	adjustfont_webkit(t, XT_FONT_SET);
 	g_object_set((GObject *)t->settings,
 	    "default-font-family", default_font_family, NULL);
@@ -1764,7 +1880,7 @@ create_browser(struct tab *t)
 	/* set defaults */
 	t->settings = webkit_web_settings_new();
 
-	g_object_get((GObject *)t->settings, "user-agent", &strval, NULL);
+	g_object_get((GObject *)t->settings, "user-agent", &strval, (char *)NULL);
 	if (strval == NULL)
 		errx(1, "setup_webkit: can't get user-agent property");
 
@@ -1812,23 +1928,23 @@ create_toolbar(struct tab *t)
 		t->backward = gtk_tool_button_new_from_stock(GTK_STOCK_GO_BACK);
 		gtk_widget_set_sensitive(GTK_WIDGET(t->backward), FALSE);
 		g_signal_connect(G_OBJECT(t->backward), "clicked",
-		    G_CALLBACK(backward_cb), t); 
-		gtk_toolbar_insert(GTK_TOOLBAR(toolbar), t->backward, -1); 
+		    G_CALLBACK(backward_cb), t);
+		gtk_toolbar_insert(GTK_TOOLBAR(toolbar), t->backward, -1);
 
 		/* forward button */
 		t->forward =
 		    gtk_tool_button_new_from_stock(GTK_STOCK_GO_FORWARD);
 		gtk_widget_set_sensitive(GTK_WIDGET(t->forward), FALSE);
 		g_signal_connect(G_OBJECT(t->forward), "clicked",
-		    G_CALLBACK(forward_cb), t); 
-		gtk_toolbar_insert(GTK_TOOLBAR(toolbar), t->forward, -1); 
+		    G_CALLBACK(forward_cb), t);
+		gtk_toolbar_insert(GTK_TOOLBAR(toolbar), t->forward, -1);
 
 		/* stop button */
-		t->stop = gtk_tool_button_new_from_stock(GTK_STOCK_STOP); 
+		t->stop = gtk_tool_button_new_from_stock(GTK_STOCK_STOP);
 		gtk_widget_set_sensitive(GTK_WIDGET(t->stop), FALSE);
 		g_signal_connect(G_OBJECT(t->stop), "clicked",
-		    G_CALLBACK(stop_cb), t); 
-		gtk_toolbar_insert(GTK_TOOLBAR(toolbar), t->stop, -1); 
+		    G_CALLBACK(stop_cb), t);
+		gtk_toolbar_insert(GTK_TOOLBAR(toolbar), t->stop, -1);
 	}
 
 	/* uri entry */
@@ -1870,6 +1986,9 @@ delete_tab(struct tab *t)
 
 	free(t->user_agent);
 	g_free(t);
+
+	TAILQ_FOREACH(t, &tabs, entry)
+		t->tab_id = gtk_notebook_page_num(notebook, t->vbox);
 }
 
 void
@@ -1883,9 +2002,9 @@ adjustfont_webkit(struct tab *t, int adjust)
 
 	t->font_size += adjust;
 	g_object_set((GObject *)t->settings, "default-font-size",
-	    t->font_size, NULL);
+	    t->font_size, (char *)NULL);
 	g_object_get((GObject *)t->settings, "default-font-size",
-	    &t->font_size, NULL);
+	    &t->font_size, (char *)NULL);
 }
 
 void
@@ -1940,12 +2059,15 @@ create_new_tab(char *title, int focus)
 	t->tab_id = gtk_notebook_append_page(notebook, t->vbox,
 	    t->label);
 
+	/* make notebook tabs reorderable */
+	gtk_notebook_set_tab_reorderable(notebook, t->vbox, TRUE);
+
 	g_object_connect((GObject*)t->cmd,
 	    "signal::key-press-event", (GCallback)cmd_keypress_cb, t,
 	    "signal::key-release-event", (GCallback)cmd_keyrelease_cb, t,
 	    "signal::focus-out-event", (GCallback)cmd_focusout_cb, t,
 	    "signal::activate", (GCallback)cmd_activate_cb, t,
-	    NULL);
+	    (char *)NULL);
 
 	g_object_connect((GObject*)t->wv,
 	    "signal-after::key-press-event", (GCallback)webview_keypress_cb, t,
@@ -1956,12 +2078,12 @@ create_new_tab(char *title, int focus)
 	    "signal::new-window-policy-decision-requested", (GCallback)webview_nw_cb, t,
 	    "signal::create-web-view", (GCallback)webview_cwv_cb, t,
 	    "signal::event", (GCallback)webview_event_cb, t,
-	    NULL);
+	    (char *)NULL);
 
 	/* hijack the unused keys as if we were the browser */
 	g_object_connect((GObject*)t->toolbar,
 	    "signal-after::key-press-event", (GCallback)webview_keypress_cb, t,
-	    NULL);
+	    (char *)NULL);
 
 	g_signal_connect(G_OBJECT(t->uri_entry), "focus",
 	    G_CALLBACK(focus_uri_entry_cb), t);
@@ -2014,7 +2136,7 @@ void
 create_canvas(void)
 {
 	GtkWidget		*vbox;
-	
+
 	vbox = gtk_vbox_new(FALSE, 0);
 	notebook = GTK_NOTEBOOK(gtk_notebook_new());
 	if (showtabs == 0)
@@ -2025,7 +2147,7 @@ create_canvas(void)
 
 	g_object_connect((GObject*)notebook,
 	    "signal::switch-page", (GCallback)notebook_switchpage_cb, NULL,
-	    NULL);
+	    (char *)NULL);
 
 	main_window = create_window();
 	gtk_container_add(GTK_CONTAINER(main_window), vbox);
@@ -2034,7 +2156,7 @@ create_canvas(void)
 }
 
 void
-setup_cookies(void)
+setup_cookies(char *file)
 {
 	if (cookiejar) {
 		soup_session_remove_feature(session,
@@ -2046,7 +2168,7 @@ setup_cookies(void)
 	if (cookies_enabled == 0)
 		return;
 
-	cookiejar = soup_cookie_jar_text_new(cookie_file, read_only_cookies);
+	cookiejar = soup_cookie_jar_text_new(file, read_only_cookies);
 	soup_session_add_feature(session, (SoupSessionFeature*)cookiejar);
 }
 
@@ -2054,7 +2176,7 @@ void
 setup_proxy(char *uri)
 {
 	if (proxy_uri) {
-		g_object_set(session, "proxy_uri", NULL, NULL);
+		g_object_set(session, "proxy_uri", NULL, (char *)NULL);
 		soup_uri_free(proxy_uri);
 		proxy_uri = NULL;
 	}
@@ -2072,7 +2194,7 @@ setup_proxy(char *uri)
 
 		DNPRINTF(XT_D_CONFIG, "setup_proxy: %s\n", uri);
 		proxy_uri = soup_uri_new(http_proxy);
-		g_object_set(session, "proxy-uri", proxy_uri, NULL);
+		g_object_set(session, "proxy-uri", proxy_uri, (char *)NULL);
 	}
 }
 
@@ -2090,6 +2212,7 @@ main(int argc, char *argv[])
 	struct stat		sb;
 	int			c, focus = 1;
 	char			conf[PATH_MAX] = { '\0' };
+	char			file[PATH_MAX];
 	char			*env_proxy = NULL;
 	FILE			*f = NULL;
 
@@ -2139,8 +2262,13 @@ main(int argc, char *argv[])
 	config_parse(conf);
 
 	/* download dir */
-	if (stat(download_dir, &sb))
-		errx(1, "must specify a valid download_dir");
+	if (!strcmp(download_dir, pwd->pw_dir))
+		strlcat(download_dir, "/downloads", sizeof download_dir);
+
+	if (stat(download_dir, &sb)) {
+		if (mkdir(download_dir, S_IRWXU) == -1)
+			err(1, "mkdir download_dir");
+	}
 	if (S_ISDIR(sb.st_mode) == 0)
 		errx(1, "%s not a dir", download_dir);
 	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
@@ -2153,7 +2281,7 @@ main(int argc, char *argv[])
 	snprintf(work_dir, sizeof work_dir, "%s/%s", pwd->pw_dir, XT_DIR);
 	if (stat(work_dir, &sb)) {
 		if (mkdir(work_dir, S_IRWXU) == -1)
-			err(1, "mkdir");
+			err(1, "mkdir work_dir");
 	}
 	if (S_ISDIR(sb.st_mode) == 0)
 		errx(1, "%s not a dir", work_dir);
@@ -2164,19 +2292,18 @@ main(int argc, char *argv[])
 	}
 
 	/* favorites file */
-	snprintf(work_dir, sizeof work_dir, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_FAVS_FILE);
-	if (stat(work_dir, &sb)) {
+	snprintf(file, sizeof file, "%s/%s", work_dir, XT_FAVS_FILE);
+	if (stat(file, &sb)) {
 		warnx("favorites file doesn't exist, creating it");
-		if ((f = fopen(work_dir, "w")) == NULL)
+		if ((f = fopen(file, "w")) == NULL)
 			err(1, "favorites");
 		fclose(f);
 	}
 
 	/* cookies */
 	session = webkit_get_default_session();
-	snprintf(cookie_file, sizeof cookie_file, "%s/cookies.txt", work_dir);
-	setup_cookies();
+	snprintf(file, sizeof file, "%s/cookies.txt", work_dir);
+	setup_cookies(file);
 
 	/* proxy */
 	env_proxy = getenv("http_proxy");

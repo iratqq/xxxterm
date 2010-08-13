@@ -1,4 +1,4 @@
-# $xxxterm: Makefile,v 1.5 2010/08/11 12:07:09 marco Exp $
+# $xxxterm: Makefile,v 1.7 2010/08/12 15:15:46 marco Exp $
 
 PREFIX?=/usr/local
 BINDIR=${PREFIX}/bin
@@ -19,5 +19,18 @@ CFLAGS+= $(GTK_CFLAGS) -Wall -pthread
 LDFLAGS+= $(GTK_LDFLAGS) -pthread
 
 MANDIR= ${PREFIX}/man/cat
+
+CLEANFILES += javascript.h
+
+javascript.h: hinting.js input-focus.js
+	perl ${.CURDIR}/js-merge-helper.pl ${.CURDIR}/hinting.js \
+	    ${.CURDIR}/input-focus.js >  ${.CURDIR}/javascript.h
+
+
+#tables.h: ${.CURDIR}/../tables ${.CURDIR}/../parsedb.pl
+#        perl ${.CURDIR}/../parsedb.pl < ${.CURDIR}/../tables
+
+
+${PROG} ${OBJS} beforedepend: javascript.h
 
 .include <bsd.prog.mk>

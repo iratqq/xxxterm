@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.100 2010/08/10 22:24:41 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.103 2010/08/12 15:17:28 marco Exp $ */
 /*
  * Copyright (c) 2010 Marco Peereboom <marco@peereboom.us>
  *
@@ -48,7 +48,35 @@
 #include <libsoup/soup.h>
 #include <JavaScriptCore/JavaScript.h>
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.100 2010/08/10 22:24:41 marco Exp $";
+#include "javascript.h"
+/*
+
+javascript.h borrowed from vimprobable2 under the following license:
+
+Copyright (c) 2009 Leon Winter
+Copyright (c) 2009 Hannes Schueller
+Copyright (c) 2009 Matto Fransen
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+*/
+
+static char		*version = "$xxxterm: xxxterm.c,v 1.103 2010/08/12 15:17:28 marco Exp $";
 
 #define XT_DEBUG
 /* #define XT_DEBUG */
@@ -63,6 +91,7 @@ static char		*version = "$xxxterm: xxxterm.c,v 1.100 2010/08/10 22:24:41 marco E
 #define	XT_D_NAV		0x0020
 #define	XT_D_DOWNLOAD		0x0040
 #define	XT_D_CONFIG		0x0080
+#define	XT_D_JS			0x0100
 u_int32_t		swm_debug = 0
 			    | XT_D_MOVE
 			    | XT_D_KEY
@@ -72,6 +101,7 @@ u_int32_t		swm_debug = 0
 			    | XT_D_NAV
 			    | XT_D_DOWNLOAD
 			    | XT_D_CONFIG
+			    | XT_D_JS
 			    ;
 #else
 #define DPRINTF(x...)
@@ -111,6 +141,15 @@ struct tab {
 	int			focus_wv;
 	int			ctrl_click;
 	gchar			*hover;
+
+	/* hints */
+	int			hints_on;
+	int			hint_mode;
+#define XT_HINT_NONE		(0)
+#define XT_HINT_NUMERICAL	(1)
+#define XT_HINT_ALPHANUM	(2)
+	char			hint_buf[128];
+	char			hint_num[128];
 
 	/* search */
 	char			*search_text;
@@ -234,6 +273,7 @@ struct alias_list	aliases;
 void			create_new_tab(char *, int);
 void			delete_tab(struct tab *);
 void			adjustfont_webkit(struct tab *, int);
+int			run_script(struct tab *, char *);
 
 struct valid_url_types {
 	char		*type;
@@ -300,7 +340,7 @@ match_alias(char *url_in)
 	char			*url_out = NULL;
 
 	arg = url_in;
-	if (strsep(&arg, " \t") == NULL)
+	if (strsep(&arg, ":") == NULL)
 		errx(1, "match_alias: NULL URL");
 
 	TAILQ_FOREACH(a, &aliases, entry) {
@@ -558,6 +598,121 @@ config_parse(char *filename)
 
 	fclose(config);
 }
+
+char *
+js_ref_to_string(JSContextRef context, JSValueRef ref)
+{
+	char			*s = NULL;
+	size_t			l;
+	JSStringRef		jsref;
+
+	jsref = JSValueToStringCopy(context, ref, NULL);
+	if (jsref == NULL)
+		return (NULL);
+
+	l = JSStringGetMaximumUTF8CStringSize(jsref);
+	s = malloc(l);
+	if (s)
+		JSStringGetUTF8CString(jsref, s, l);
+	JSStringRelease(jsref);
+
+	return (s);
+}
+
+void
+disable_hints(struct tab *t)
+{
+	bzero(t->hint_buf, sizeof t->hint_buf);
+	bzero(t->hint_num, sizeof t->hint_num);
+	run_script(t, "vimprobable_clear()");
+	t->hints_on = 0;
+	t->hint_mode = XT_HINT_NONE;
+}
+
+void
+enable_hints(struct tab *t)
+{
+	bzero(t->hint_buf, sizeof t->hint_buf);
+	run_script(t, "vimprobable_show_hints()");
+	t->hints_on = 1;
+	t->hint_mode = XT_HINT_NONE;
+}
+
+#define XT_JS_OPEN	("open;")
+#define XT_JS_OPEN_LEN	(strlen(XT_JS_OPEN))
+#define XT_JS_FIRE	("fire;")
+#define XT_JS_FIRE_LEN	(strlen(XT_JS_FIRE))
+#define XT_JS_FOUND	("found;")
+#define XT_JS_FOUND_LEN	(strlen(XT_JS_FOUND))
+
+int
+run_script(struct tab *t, char *s)
+{
+	JSGlobalContextRef	ctx;
+	WebKitWebFrame		*frame;
+	JSStringRef		str;
+	JSValueRef		val, exception;
+	char			*es, buf[128];
+
+	DNPRINTF(XT_D_JS, "run_script: tab %d %s\n",
+	    t->tab_id, s == (char *)JS_HINTING ? "JS_HINTING" : s);
+
+	frame = webkit_web_view_get_main_frame(t->wv);
+	ctx = webkit_web_frame_get_global_context(frame);
+
+	str = JSStringCreateWithUTF8CString(s);
+	val = JSEvaluateScript(ctx, str, JSContextGetGlobalObject(ctx),
+	    NULL, 0, &exception);
+	JSStringRelease(str);
+
+	DNPRINTF(XT_D_JS, "run_script: val %p\n", val);
+	if (val == NULL) {
+		es = js_ref_to_string(ctx, exception);
+		DNPRINTF(XT_D_JS, "run_script: exception %s\n", es);
+		free(es);
+		return (1);
+	} else {
+		es = js_ref_to_string(ctx, val);
+		DNPRINTF(XT_D_JS, "run_script: val %s\n", es);
+
+		/* handle return value right here */
+		if (!strncmp(es, XT_JS_OPEN, XT_JS_OPEN_LEN)) {
+			disable_hints(t);
+			webkit_web_view_load_uri(t->wv, &es[XT_JS_OPEN_LEN]);
+		}
+
+		if (!strncmp(es, XT_JS_FIRE, XT_JS_FIRE_LEN)) {
+			snprintf(buf, sizeof buf, "vimprobable_fire(%s)",
+			    &es[XT_JS_FIRE_LEN]);
+			run_script(t, buf);
+			disable_hints(t);
+		}
+
+		if (!strncmp(es, XT_JS_FOUND, XT_JS_FOUND_LEN)) {
+			if (atoi(&es[XT_JS_FOUND_LEN]) == 0)
+				disable_hints(t);
+		}
+
+		free(es);
+	}
+
+	return (0);
+}
+
+int
+hint(struct tab *t, struct karg *args)
+{
+
+	DNPRINTF(XT_D_JS, "hint: tab %d\n", t->tab_id);
+
+	if (t->hints_on == 0)
+		enable_hints(t);
+	else
+		disable_hints(t);
+
+	return (0);
+}
+
 int
 quit(struct tab *t, struct karg *args)
 {
@@ -1163,6 +1318,9 @@ struct key {
 	{ 0,			0,	GDK_F6,		focus,		{.i = XT_FOCUS_URI} },
 	{ 0,			0,	GDK_F7,		focus,		{.i = XT_FOCUS_SEARCH} },
 
+	/* hinting */
+	{ 0,			0,	GDK_f,		hint,		{.i = 0} },
+
 	/* navigation */
 	{ 0,			0,	GDK_BackSpace,	navaction,	{.i = XT_NAV_BACK} },
 	{ GDK_MOD1_MASK,	0,	GDK_Left,	navaction,	{.i = XT_NAV_BACK} },
@@ -1389,6 +1547,19 @@ notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 	    webkit_web_view_can_go_forward(wview));
 }
 
+void
+webview_load_finished_cb(WebKitWebView *wv, WebKitWebFrame *wf, struct tab *t)
+{
+	run_script(t, JS_HINTING);
+}
+
+void
+webview_progress_changed_cb(WebKitWebView *wv, int progress, struct tab *t)
+{
+	gtk_entry_set_progress_fraction(GTK_ENTRY(t->uri_entry),
+	    progress == 100 ? 0 : (double)progress / 100);
+}
+
 int
 webview_nw_cb(WebKitWebView *wv, WebKitWebFrame *wf,
     WebKitNetworkRequest *request, WebKitWebNavigationAction *na,
@@ -1577,6 +1748,9 @@ int
 webview_keypress_cb(GtkWidget *w, GdkEventKey *e, struct tab *t)
 {
 	int			i;
+	char			s[2], buf[128];
+	const char		*errstr = NULL;
+	long long		link;
 
 	/* don't use w directly; use t->whatever instead */
 
@@ -1585,6 +1759,115 @@ webview_keypress_cb(GtkWidget *w, GdkEventKey *e, struct tab *t)
 
 	DNPRINTF(XT_D_KEY, "webview_keypress_cb: keyval 0x%x mask 0x%x t %p\n",
 	    e->keyval, e->state, t);
+
+	if (t->hints_on) {
+		/* ESC */
+		if (CLEAN(e->state) == 0 && e->keyval == GDK_Escape) {
+			disable_hints(t);
+			return (XT_CB_HANDLED);
+		}
+
+		/* RETURN */
+		if (CLEAN(e->state) == 0 && e->keyval == GDK_Return) {
+			link = strtonum(t->hint_num, 1, 1000, &errstr);
+			if (errstr) {
+				/* we have a string */
+			} else {
+				/* we have a number */
+				snprintf(buf, sizeof buf, "vimprobable_fire(%s)",
+				    t->hint_num);
+				run_script(t, buf);
+			}
+			disable_hints(t);
+		}
+
+		/* BACKSPACE */
+		/* XXX unfuck this */
+		if (CLEAN(e->state) == 0 && e->keyval == GDK_BackSpace) {
+			if (t->hint_mode == XT_HINT_NUMERICAL) {
+				/* last input was numerical */
+				int		l;
+				l = strlen(t->hint_num);
+				if (l > 0) {
+					l--;
+					if (l == 0) {
+						disable_hints(t);
+						enable_hints(t);
+					} else {
+						t->hint_num[l] = '\0';
+						goto num;
+					}
+				}
+			} else if (t->hint_mode == XT_HINT_ALPHANUM) {
+				/* last input was alphanumerical */
+				int		l;
+				l = strlen(t->hint_buf);
+				if (l > 0) {
+					l--;
+					if (l == 0) {
+						disable_hints(t);
+						enable_hints(t);
+					} else {
+						t->hint_buf[l] = '\0';
+						goto anum;
+					}
+				}
+			} else {
+				/* bogus */
+				disable_hints(t);
+			}
+		}
+
+		/* numerical input */
+		if (CLEAN(e->state) == 0 &&
+		    ((e->keyval >= GDK_0 && e->keyval <= GDK_9) || (e->keyval >= GDK_KP_0 && e->keyval <= GDK_KP_9))) {
+			snprintf(s, sizeof s, "%c", e->keyval);
+			strlcat(t->hint_num, s, sizeof t->hint_num);
+			DNPRINTF(XT_D_JS, "webview_keypress_cb: numerical %s\n",
+			    t->hint_num);
+num:
+			link = strtonum(t->hint_num, 1, 1000, &errstr);
+			if (errstr) {
+				DNPRINTF(XT_D_JS, "webview_keypress_cb: invalid link number\n");
+				disable_hints(t);
+			} else {
+				snprintf(buf, sizeof buf, "vimprobable_update_hints(%s)",
+				    t->hint_num);
+				t->hint_mode = XT_HINT_NUMERICAL;
+				run_script(t, buf);
+			}
+
+			/* empty the counter buffer */
+			bzero(t->hint_buf, sizeof t->hint_buf);
+			return (XT_CB_HANDLED);
+		}
+
+		/* alphanumerical input */
+		if (
+		    (CLEAN(e->state) == 0 && e->keyval >= GDK_a && e->keyval <= GDK_z) ||
+		    (CLEAN(e->state) == GDK_SHIFT_MASK && e->keyval >= GDK_A && e->keyval <= GDK_Z) ||
+		    (CLEAN(e->state) == 0 && ((e->keyval >= GDK_0 && e->keyval <= GDK_9) ||
+		    ((e->keyval >= GDK_KP_0 && e->keyval <= GDK_KP_9) && (t->hint_mode != XT_HINT_NUMERICAL))))) {
+			snprintf(s, sizeof s, "%c", e->keyval);
+			strlcat(t->hint_buf, s, sizeof t->hint_buf);
+			DNPRINTF(XT_D_JS, "webview_keypress_cb: alphanumerical %s\n",
+			    t->hint_buf);
+anum:
+			snprintf(buf, sizeof buf, "vimprobable_cleanup()");
+			run_script(t, buf);
+
+			snprintf(buf, sizeof buf, "vimprobable_show_hints('%s')",
+			    t->hint_buf);
+			t->hint_mode = XT_HINT_ALPHANUM;
+			run_script(t, buf);
+
+			/* empty the counter buffer */
+			bzero(t->hint_num, sizeof t->hint_num);
+			return (XT_CB_HANDLED);
+		}
+
+		return (XT_CB_HANDLED);
+	}
 
 	for (i = 0; i < LENGTH(keys); i++)
 		if (e->keyval == keys[i].key && CLEAN(e->state) ==
@@ -1874,9 +2157,6 @@ create_browser(struct tab *t)
 	t->wv = WEBKIT_WEB_VIEW(webkit_web_view_new());
 	gtk_container_add(GTK_CONTAINER(w), GTK_WIDGET(t->wv));
 
-	g_signal_connect(t->wv, "notify::load-status",
-	    G_CALLBACK(notify_load_status_cb), t);
-
 	/* set defaults */
 	t->settings = webkit_web_settings_new();
 
@@ -2078,7 +2358,11 @@ create_new_tab(char *title, int focus)
 	    "signal::new-window-policy-decision-requested", (GCallback)webview_nw_cb, t,
 	    "signal::create-web-view", (GCallback)webview_cwv_cb, t,
 	    "signal::event", (GCallback)webview_event_cb, t,
+	    "signal::load-finished", (GCallback)webview_load_finished_cb, t,
+	    "signal::load-progress-changed", (GCallback)webview_progress_changed_cb, t,
 	    (char *)NULL);
+	g_signal_connect(t->wv, "notify::load-status",
+	    G_CALLBACK(notify_load_status_cb), t);
 
 	/* hijack the unused keys as if we were the browser */
 	g_object_connect((GObject*)t->toolbar,

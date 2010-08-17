@@ -255,6 +255,7 @@ char			*serif_font_family = NULL;
 char			*sans_serif_font_family = NULL;
 char			*monospace_font_family = NULL;
 char			*default_encoding = NULL;
+char			*user_stylesheet = NULL;
 int			fancy_bar = 1;	/* fancy toolbar */
 
 char			*home = "http://www.peereboom.us";
@@ -550,6 +551,8 @@ config_parse(char *filename)
 			monospace_font_family = strdup(val);
 		else if (!strcmp(var, "default_encoding"))
 			default_encoding = strdup(val);
+		else if (!strcmp(var, "user_stylesheet"))
+			user_stylesheet = strdup(val);
 		else if (!strcmp(var, "fancy_bar"))
 			fancy_bar = atoi(val);
 		else if (!strcmp(var, "mime_type"))
@@ -1224,6 +1227,7 @@ set(struct tab *t, struct karg *args)
 		mnprintf(&s, &l, "sans_serif_font_family\t= %d<br>", sans_serif_font_family);
 		mnprintf(&s, &l, "monospace_font_family\t= %d<br>", monospace_font_family);
 		mnprintf(&s, &l, "default_encoding\t= %s<br>", default_encoding);
+		mnprintf(&s, &l, "user_stylesheet\t= %d<br>", user_stylesheet);
 		mnprintf(&s, &l, "enable_plugins\t\t= %d<br>", enable_plugins);
 		mnprintf(&s, &l, "enable_scripts\t\t= %d<br>", enable_scripts);
 		mnprintf(&s, &l, "fancy_bar\t\t= %d<br>", fancy_bar);
@@ -2121,6 +2125,8 @@ setup_webkit(struct tab *t)
 	    "monospace-font-family", monospace_font_family, NULL);
 	g_object_set((GObject *)t->settings,
 	    "default-encoding", default_encoding, NULL);
+	g_object_set((GObject *)t->settings,
+	    "user-stylesheet-uri", user_stylesheet, NULL);
 
 	webkit_web_view_set_settings(t->wv, t->settings);
 }

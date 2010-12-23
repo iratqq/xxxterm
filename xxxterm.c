@@ -1,6 +1,7 @@
-/* $xxxterm: xxxterm.c,v 1.106 2010/08/15 22:26:29 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.138 2010/12/22 23:21:05 vext01 Exp $ */
 /*
  * Copyright (c) 2010 Marco Peereboom <marco@peereboom.us>
+ * Copyright (c) 2010 Edd Barrett <vext01@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -20,14 +21,14 @@
  *	inverse color browsing
  *	favs
  *		- add favicon
- *	download files status
+ *		- store in sqlite
  *	multi letter commands
  *	pre and post counts for commands
  *	fav icon
- *	close tab X
  *	autocompletion on various inputs
  *	create privacy browsing
  *		- encrypted local data
+ *	add js whitelist
  */
 
 #include <stdio.h>
@@ -37,7 +38,13 @@
 #include <string.h>
 #include <unistd.h>
 #include <util.h>
+#include <pthread.h>
 
+#ifdef __linux__
+#include "linux/tree.h"
+#else
+#include <sys/tree.h>
+#endif
 #include <sys/queue.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -76,10 +83,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.106 2010/08/15 22:26:29 marco Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.138 2010/12/22 23:21:05 vext01 Exp $";
 
-#define XT_DEBUG
-/* #define XT_DEBUG */
+/*#define XT_DEBUG*/
 #ifdef XT_DEBUG
 #define DPRINTF(x...)		do { if (swm_debug) fprintf(stderr, x); } while (0)
 #define DNPRINTF(n,x...)	do { if (swm_debug & n) fprintf(stderr, x); } while (0)
@@ -92,6 +98,9 @@ static char		*version = "$xxxterm: xxxterm.c,v 1.106 2010/08/15 22:26:29 marco E
 #define	XT_D_DOWNLOAD		0x0040
 #define	XT_D_CONFIG		0x0080
 #define	XT_D_JS			0x0100
+#define	XT_D_FAVORITE		0x0200
+#define	XT_D_PRINTING		0x0400
+#define	XT_D_COOKIE		0x0800
 u_int32_t		swm_debug = 0
 			    | XT_D_MOVE
 			    | XT_D_KEY
@@ -102,6 +111,9 @@ u_int32_t		swm_debug = 0
 			    | XT_D_DOWNLOAD
 			    | XT_D_CONFIG
 			    | XT_D_JS
+			    | XT_D_FAVORITE
+			    | XT_D_PRINTING
+			    | XT_D_COOKIE
 			    ;
 #else
 #define DPRINTF(x...)
@@ -142,6 +154,7 @@ struct tab {
 	int			focus_wv;
 	int			ctrl_click;
 	gchar			*hover;
+	int			xtp_meaning; /* identifies dls/favorites */
 
 	/* hints */
 	int			hints_on;
@@ -163,6 +176,30 @@ struct tab {
 };
 TAILQ_HEAD(tab_list, tab);
 
+struct history {
+	RB_ENTRY(history)	entry;
+	const gchar		*uri;
+	const gchar		*title;
+};
+RB_HEAD(history_list, history);
+
+struct download {
+	RB_ENTRY(download)	entry;
+	int			id;
+	WebKitDownload		*download;
+	struct tab		*tab;
+};
+RB_HEAD(download_list, download);
+
+struct domain {
+	RB_ENTRY(domain)	entry;
+	gchar			*d;
+};
+RB_HEAD(domain_list, domain);
+
+/* starts from 1 to catch atoi() failures when calling dlman_ctrl() */
+int				next_download_id = 1;
+
 struct karg {
 	int		i;
 	char		*s;
@@ -175,6 +212,56 @@ struct karg {
 #define XT_FAVS_FILE		("favorites")
 #define XT_CB_HANDLED		(TRUE)
 #define XT_CB_PASSTHROUGH	(FALSE)
+#define XT_DOCTYPE		"<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.0 Transitional//EN' 'http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd'>"
+#define XT_HTML_TAG		"<html xmlns='http://www.w3.org/1999/xhtml'>"
+#define XT_DLMAN_REFRESH	"10"
+#define XT_PAGE_STYLE		"<style type='text/css'>\n" \
+				"td {overflow: hidden;}\n"  \
+				"th {background-color: #cccccc}"  \
+				"table {width: 90%; border: 1px black"    \
+				" solid; table-layout: fixed}\n</style>\n\n"
+
+/* file sizes */
+#define SZ_KB		((uint64_t) 1024)
+#define SZ_MB		(SZ_KB * SZ_KB)
+#define SZ_GB		(SZ_KB * SZ_KB * SZ_KB)
+#define SZ_TB		(SZ_KB * SZ_KB * SZ_KB * SZ_KB)
+
+/*
+ * xxxterm "protocol" (xtp)
+ * We use this for managing stuff like downloads and favorites. They
+ * make magical HTML pages in memory which have xxxt:// links in order
+ * to communicate with xxxterm's internals. These links take the format:
+ * xxxt://class/session_key/action/arg
+ *
+ * Don't begin xtp class/actions as 0. atoi returns that on error.
+ *
+ * Typically we have not put addition of items in this framework, as
+ * adding items is either done via an ex-command or via a keybinding instead.
+ */
+
+#define XT_XTP_STR		"xxxt://"
+
+/* XTP classes (xxxt://<class>) */
+#define XT_XTP_DL		1	/* downloads */
+#define XT_XTP_HL		2	/* history */
+
+/* XTP download actions */
+#define XT_XTP_DL_LIST		1
+#define XT_XTP_DL_CANCEL	2
+#define XT_XTP_DL_REMOVE	3
+
+/* XTP history actions */
+#define XT_XTP_HL_LIST		1
+#define XT_XTP_HL_REMOVE	2
+
+/* XXX add favorites to xtp */
+
+/* xtp tab meanings  - identifies which tabs have xtp pages in */
+#define XT_XTP_TAB_MEANING_NORMAL	0 /* normal url */
+#define XT_XTP_TAB_MEANING_DOWNLOAD	1 /* download manager in this tab */
+#define XT_XTP_TAB_MEANING_FAVORITE	2 /* favorite manager in this tab */
+#define XT_XTP_TAB_MEANING_HISTORY	3 /* history manager in this tab */
 
 /* actions */
 #define XT_MOVE_INVALID		(0)
@@ -222,6 +309,13 @@ struct passwd		*pwd;
 GtkWidget		*main_window;
 GtkNotebook		*notebook;
 struct tab_list		tabs;
+struct history_list	hl;
+struct download_list	downloads;
+struct domain_list	c_wl;
+struct domain_list	js_wl;
+int			updating_dl_tabs = 0;
+int			updating_hl_tabs = 0;
+char			*global_search;
 
 /* mime types */
 struct mime_type {
@@ -257,6 +351,21 @@ char			*monospace_font_family = NULL;
 char			*default_encoding = NULL;
 char			*user_stylesheet = NULL;
 int			fancy_bar = 1;	/* fancy toolbar */
+unsigned		refresh_interval = 10; /* download refresh interval */
+int			enable_cookie_whitelist = 1;
+int			enable_js_whitelist = 1;
+time_t			session_timeout = 3600; /* cookie session timeout */
+int			cookie_policy = SOUP_COOKIE_JAR_ACCEPT_NO_THIRD_PARTY;
+/*
+ * Session IDs.
+ * We use these to prevent people putting xxxt:// URLs on
+ * websites in the wild. We generate 8 bytes and represent in hex (16 chars)
+ */
+#define XT_XTP_SES_KEY_SZ	8
+#define XT_XTP_SES_KEY_HEX_FMT  \
+	"%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx"
+char			*dl_session_key;	/* downloads */
+char			*hl_session_key;	/* history list */
 
 char			*home = "http://www.peereboom.us";
 char			*search_string = NULL;
@@ -266,7 +375,7 @@ char			work_dir[PATH_MAX];
 char			cookie_file[PATH_MAX];
 char			download_dir[PATH_MAX];
 SoupSession		*session;
-SoupCookieJar		*cookiejar;
+SoupCookieJar		*p_cookiejar;
 
 struct mime_type_list	mtl;
 struct alias_list	aliases;
@@ -276,6 +385,68 @@ void			create_new_tab(char *, int);
 void			delete_tab(struct tab *);
 void			adjustfont_webkit(struct tab *, int);
 int			run_script(struct tab *, char *);
+int			download_rb_cmp(struct download *, struct download *);
+int			show_hist(struct tab *t, struct karg *args);
+int			dlman(struct tab *t, struct karg *args);
+
+int
+history_rb_cmp(struct history *h1, struct history *h2)
+{
+	return (strcmp(h1->uri, h2->uri));
+}
+RB_GENERATE(history_list, history, entry, history_rb_cmp);
+
+int
+domain_rb_cmp(struct domain *d1, struct domain *d2)
+{
+	return (strcmp(d1->d, d2->d));
+}
+RB_GENERATE(domain_list, domain, entry, domain_rb_cmp);
+
+/*
+ * generate a session key to secure xtp commands.
+ * pass in a ptr to the key in question and it will
+ * be modified in place.
+ */
+void
+generate_xtp_session_key(char **key)
+{
+	uint8_t			rand_bytes[XT_XTP_SES_KEY_SZ];
+
+	/* free old key */
+	if (*key)
+		g_free(*key);
+
+	/* make a new one */
+	arc4random_buf(rand_bytes, XT_XTP_SES_KEY_SZ);
+	*key = g_strdup_printf(XT_XTP_SES_KEY_HEX_FMT,
+	    rand_bytes[0], rand_bytes[1], rand_bytes[2], rand_bytes[3],
+	    rand_bytes[4], rand_bytes[5], rand_bytes[6], rand_bytes[7]);
+
+	DNPRINTF(XT_D_DOWNLOAD, "%s: new session key '%s'\n", __func__, *key);
+}
+
+/*
+ * validate a xtp session key.
+ * return 1 if OK
+ */
+int
+validate_xtp_session_key(char *trusted, char *untrusted)
+{
+	if (strcmp(trusted, untrusted) != 0) {
+		warn("%s: xtp session key mismatch possible spoof", __func__);
+		return (0);
+	}
+
+	return (1);
+}
+
+int
+download_rb_cmp(struct download *e1, struct download *e2)
+{
+	return (e1->id < e2->id ? -1 : e1->id > e2->id);
+}
+RB_GENERATE(download_list, download, entry, download_rb_cmp);
 
 struct valid_url_types {
 	char		*type;
@@ -284,6 +455,7 @@ struct valid_url_types {
 	{ "https://" },
 	{ "ftp://" },
 	{ "file://" },
+	{ XT_XTP_STR },
 };
 
 int
@@ -482,6 +654,105 @@ find_mime_type(char *mime_type)
 	return (rv);
 }
 
+void
+wl_add(char *str, struct domain_list *wl)
+{
+	struct domain		*d;
+	int			add_dot = 0;
+
+	if (str == NULL || wl == NULL)
+		return;
+	if (strlen(str) < 2)
+		return;
+
+	DNPRINTF(XT_D_COOKIE, "wl_add in: %s\n", str);
+
+	/* treat *.moo.com the same as .moo.com */
+	if (str[0] == '*' && str[1] == '.')
+		str = &str[1];
+	else if (str[0] == '.')
+		str = &str[0];
+	else
+		add_dot = 1;
+
+	d = g_malloc(sizeof *d);
+	if (add_dot)
+		d->d = g_strdup_printf(".%s", str);
+	else
+		d->d = g_strdup(str);
+
+	if (RB_INSERT(domain_list, wl, d))
+		goto unwind;
+
+	DNPRINTF(XT_D_COOKIE, "wl_add: %s\n", d->d);
+	return;
+unwind:
+	if (d) {
+		if (d->d)
+			g_free(d->d);
+		g_free(d);
+	}
+}
+
+struct domain *
+wl_find(gchar *search, struct domain_list *wl)
+{
+	int			i;
+	struct domain		*d = NULL, dfind;
+	gchar			*s = NULL;
+
+	if (search == NULL || wl == NULL)
+		return (NULL);
+	if (strlen(search) < 2)
+		return (NULL);
+
+	if (search[0] != '.')
+		s = g_strdup_printf(".%s", search);
+	else
+		s = g_strdup(search);
+
+	for (i = strlen(s) - 1; i >= 0; i--) {
+		if (s[i] == '.') {
+			dfind.d = &s[i];
+			d = RB_FIND(domain_list, wl, &dfind);
+			if (d)
+				goto done;
+		}
+	}
+
+done:
+	if (s)
+		g_free(s);
+
+	return (d);
+}
+
+struct domain *
+wl_find_uri(gchar *s, struct domain_list *wl)
+{
+	int			i;
+
+	if (s == NULL || wl == NULL)
+		return (NULL);
+
+	if (!strncmp(s, "http://", strlen("http://")))
+		s = &s[strlen("http://")];
+	else if (!strncmp(s, "https://", strlen("https://")))
+		s = &s[strlen("https://")];
+
+	if (strlen(s) < 2)
+		return (NULL);
+
+	for (i = 0; i < strlen(s) + 1 /* yes er need this */; i++)
+		/* chop string at first slash */
+		if (s[i] == '/' || s[i] == '\0') {
+			s[i] = '\0';
+			return (wl_find(s, wl));
+		}
+
+	return (NULL);
+}
+
 #define	WS	"\n= \t"
 void
 config_parse(char *filename)
@@ -553,7 +824,37 @@ config_parse(char *filename)
 			default_encoding = strdup(val);
 		else if (!strcmp(var, "user_stylesheet"))
 			user_stylesheet = strdup(val);
-		else if (!strcmp(var, "fancy_bar"))
+		else if (!strcmp(var, "refresh_interval"))
+			refresh_interval = atoi(val);
+		else if (!strcmp(var, "enable_cookie_whitelist"))
+			enable_cookie_whitelist = atoi(val);
+		else if (!strcmp(var, "enable_js_whitelist"))
+			enable_js_whitelist = atoi(val);
+		else if (!strcmp(var, "cookie_policy")) {
+			if (!strcmp(val, "no3rdparty"))
+				cookie_policy =
+				    SOUP_COOKIE_JAR_ACCEPT_NO_THIRD_PARTY;
+			else if (!strcmp(val, "accept"))
+				cookie_policy =
+				    SOUP_COOKIE_JAR_ACCEPT_ALWAYS;
+			else if (!strcmp(val, "reject"))
+				cookie_policy =
+				    SOUP_COOKIE_JAR_ACCEPT_NEVER;
+			else {
+				/* reject when set wrong */
+				warnx("invalid cookie_policy %s", val);
+				cookie_policy =
+				    SOUP_COOKIE_JAR_ACCEPT_NEVER;
+			}
+		} else if (!strcmp(var, "cookie_wl"))
+			wl_add(val, &c_wl);
+		else if (!strcmp(var, "js_wl"))
+			wl_add(val, &js_wl);
+		else if (!strcmp(var, "session_timeout")) {
+			session_timeout = atoi(val);
+			if (session_timeout < 3600)
+				session_timeout = 0; /* use default timeout */
+		} else if (!strcmp(var, "fancy_bar"))
 			fancy_bar = atoi(val);
 		else if (!strcmp(var, "mime_type"))
 			add_mime_type(val);
@@ -705,6 +1006,54 @@ quit(struct tab *t, struct karg *args)
 }
 
 int
+toggle_js(struct tab *t, struct karg *args)
+{
+	int			es, i;
+	WebKitWebFrame		*frame;
+	gchar			*s;
+	struct domain		*d;
+
+	g_object_get((GObject *)t->settings,
+	    "enable-scripts", &es, (char *)NULL);
+	es = !es;
+	g_object_set((GObject *)t->settings,
+	    "enable-scripts", es, (char *)NULL);
+	webkit_web_view_set_settings(t->wv, t->settings);
+
+	frame = webkit_web_view_get_main_frame(t->wv);
+	s = (gchar *)webkit_web_frame_get_uri(frame);
+
+	/* this code is shared with wl_find_uri, refactor */
+	if (s == NULL)
+		return (NULL);
+
+	if (!strncmp(s, "http://", strlen("http://")))
+		s = &s[strlen("http://")];
+	else if (!strncmp(s, "https://", strlen("https://")))
+		s = &s[strlen("https://")];
+
+	if (strlen(s) < 2)
+		return (NULL);
+
+	for (i = 0; i < strlen(s) + 1; i++)
+		/* chop string at first slash */
+		if (s[i] == '/' || s[i] == '\0') {
+			s[i] = '\0';
+			if (es)
+				wl_add(s, &js_wl);
+			else {
+				d = wl_find(s, &js_wl);
+				if (d)
+					RB_REMOVE(domain_list, &js_wl, d);
+			}
+			webkit_web_view_reload(t->wv);
+			return (0);
+		}
+
+	return (0);
+}
+
+int
 focus(struct tab *t, struct karg *args)
 {
 	if (t == NULL || args == NULL)
@@ -733,19 +1082,21 @@ help(struct tab *t, struct karg *args)
 	return (0);
 }
 
+/* show a list of favorites (bookmarks) */
 int
 favorites(struct tab *t, struct karg *args)
 {
 	char			file[PATH_MAX];
-	FILE			*f, *h;
+	FILE			*f;
 	char			*uri = NULL, *title = NULL;
 	size_t			len, lineno = 0;
 	int			i, failed = 0;
+	char			*header, *body, *tmp, *html = NULL;
+
+	DNPRINTF(XT_D_FAVORITE, "%s:", __func__);
 
 	if (t == NULL)
 		errx(1, "favorites");
-
-	/* XXX run a digest over the favorites file instead of always generating it */
 
 	/* open favorites */
 	snprintf(file, sizeof file, "%s/%s/%s",
@@ -755,15 +1106,17 @@ favorites(struct tab *t, struct karg *args)
 		return (1);
 	}
 
-	/* open favorites html */
-	snprintf(file, sizeof file, "%s/%s/%s.html",
-	    pwd->pw_dir, XT_DIR, XT_FAVS_FILE);
-	if ((h = fopen(file, "w+")) == NULL) {
-		warn("favorites.html");
-		return (1);
-	}
+	/* header */
+	header = g_strdup_printf(XT_DOCTYPE XT_HTML_TAG "\n<head>"
+	    "<title>Favorites</title>\n"
+	    "%s"
+	    "</head>"
+	    "<h1>Favorites</h1>\n",
+	    XT_PAGE_STYLE);
 
-	fprintf(h, "<html><body>Favorites:<p>\n<ol>\n");
+	/* body */
+	body = g_strdup_printf("<div align='center'><table><tr>"
+	    "<th style='width: 4%%'>&#35;</th><th>Link</th></tr>\n");
 
 	for (i = 1;;) {
 		if ((title = fparseln(f, &len, &lineno, NULL, 0)) == NULL)
@@ -777,11 +1130,17 @@ favorites(struct tab *t, struct karg *args)
 
 		if ((uri = fparseln(f, &len, &lineno, NULL, 0)) == NULL)
 			if (feof(f) || ferror(f)) {
+				errx(0, "%s: can't parse favorites\n",
+				    __func__);
 				failed = 1;
 				break;
 			}
 
-		fprintf(h, "<li><a href=\"%s\">%s</a><br>\n", uri, title);
+		tmp = body;
+		body = g_strdup_printf("%s<tr><td>%d</td><td><a href='%s'>%s"
+		    "</a></td></tr>\n", body, i, uri, title);
+
+		g_free(tmp);
 
 		free(uri);
 		uri = NULL;
@@ -789,29 +1148,28 @@ favorites(struct tab *t, struct karg *args)
 		title = NULL;
 		i++;
 	}
+	fclose(f);
 
 	if (uri)
 		free(uri);
 	if (title)
 		free(title);
 
-	fprintf(h, "</ol></body></html>");
-	fclose(f);
-	fclose(h);
-
-	if (failed) {
-		webkit_web_view_load_string(t->wv,
-		    "<html><body>Invalid favorites file</body></html>",
-		    NULL,
-		    NULL,
-		    NULL);
-	} else {
-		snprintf(file, sizeof file, "file://%s/%s/%s.html",
-		    pwd->pw_dir, XT_DIR, XT_FAVS_FILE);
-		webkit_web_view_load_uri(t->wv, file);
+	/* render */
+	if (!failed) {
+		html = g_strdup_printf("%s%s</table></div></html>",
+		    header, body);
+		webkit_web_view_load_string(t->wv, html, NULL, NULL, "");
 	}
 
-	return (0);
+	if (header)
+		g_free(header);
+	if (body)
+		g_free(body);
+	if (html)
+		g_free(html);
+
+	return (failed);
 }
 
 int
@@ -1149,6 +1507,299 @@ command(struct tab *t, struct karg *args)
 	return (XT_CB_HANDLED);
 }
 
+/*
+ * Return a new string with a download row (in html)
+ * appended. Old string is freed.
+ */
+char *
+dlman_table_row(char *html, struct download *dl)
+{
+
+	WebKitDownloadStatus	stat;
+	char			*status_html = NULL, *cmd_html = NULL, *new_html;
+	gdouble			progress;
+	char			cur_sz[FMT_SCALED_STRSIZE];
+	char			tot_sz[FMT_SCALED_STRSIZE];
+	char			*xtp_prefix; 
+
+	DNPRINTF(XT_D_DOWNLOAD, "%s: dl->id %d\n", __func__, dl->id);
+
+	/* All actions wil take this form:
+	 * xxxt://class/seskey
+	 */ 
+	xtp_prefix = g_strdup_printf("%s%d/%s/",
+	    XT_XTP_STR, XT_XTP_DL, dl_session_key);
+
+	stat = webkit_download_get_status(dl->download);
+
+	switch (stat) {
+	case WEBKIT_DOWNLOAD_STATUS_FINISHED:
+		status_html = g_strdup_printf("Finished");
+		cmd_html = g_strdup_printf(
+		    "<a href='%s%d/%d'>Remove</a>",
+		    xtp_prefix, XT_XTP_DL_REMOVE, dl->id);
+		break;
+	case WEBKIT_DOWNLOAD_STATUS_STARTED:
+		/* gather size info */
+		progress = 100 * webkit_download_get_progress(dl->download);
+
+		fmt_scaled(
+		    webkit_download_get_current_size(dl->download), cur_sz);
+		fmt_scaled(
+		    webkit_download_get_total_size(dl->download), tot_sz);
+
+		status_html = g_strdup_printf("%s of %s (%.2f%%)", cur_sz,
+		    tot_sz, progress);
+		cmd_html = g_strdup_printf("<a href='%s%d/%d'>Cancel</a>",
+		    xtp_prefix, XT_XTP_DL_CANCEL, dl->id);
+
+		break;
+		/* LLL */
+	case WEBKIT_DOWNLOAD_STATUS_CANCELLED:
+		status_html = g_strdup_printf("Cancelled");
+		cmd_html = g_strdup_printf("<a href='%s%d/%d'>Remove</a>",
+		    xtp_prefix, XT_XTP_DL_REMOVE, dl->id);
+		break;
+	case WEBKIT_DOWNLOAD_STATUS_ERROR:
+		status_html = g_strdup_printf("Error!");
+		cmd_html = g_strdup_printf("<a href='%s%d/%d'>Remove</a>",
+		    xtp_prefix, XT_XTP_DL_REMOVE, dl->id);
+		break;
+	case WEBKIT_DOWNLOAD_STATUS_CREATED:
+		cmd_html = g_strdup_printf("<a href='%s%d/%d'>Cancel</a>",
+		    xtp_prefix, XT_XTP_DL_CANCEL, dl->id);
+		status_html = g_strdup_printf("Starting");
+		break;
+	default:
+		warn("%s: unknown download status", __func__);
+	};
+
+	new_html = g_strdup_printf(
+	    "%s\n<tr><td>%s</td><td>%s</td>"
+	    "<td style='text-align:center'>%s</td></tr>\n",
+	    html, webkit_download_get_uri(dl->download),
+	    status_html, cmd_html);
+	g_free(html);
+
+	if (status_html)
+		g_free(status_html);
+
+	if (cmd_html)
+		g_free(cmd_html);
+
+	g_free(xtp_prefix);
+
+	return new_html;
+}
+
+/*
+ * update all download tabs apart from one. Pass NULL if
+ * you want to update all.
+ */
+void
+update_download_tabs(struct tab *apart_from)
+{
+	struct tab			*t;
+	if (!updating_dl_tabs) {
+		updating_dl_tabs = 1; /* stop infinite recursion */
+		TAILQ_FOREACH(t, &tabs, entry)
+			if ((t->xtp_meaning == XT_XTP_TAB_MEANING_DOWNLOAD)
+			    && (t != apart_from))
+				dlman(t, NULL);
+		updating_dl_tabs = 0;
+	}
+}
+
+/*
+ * update all history tabs apart from one. Pass NULL if
+ * you want to update all.
+ */
+void
+update_history_tabs(struct tab *apart_from)
+{
+	struct tab			*t;
+
+	if (!updating_hl_tabs) {
+		updating_hl_tabs = 1; /* stop infinite recursion */
+		TAILQ_FOREACH(t, &tabs, entry)
+			if ((t->xtp_meaning == XT_XTP_TAB_MEANING_HISTORY)
+			    && (t != apart_from))
+				show_hist(t, NULL);
+		updating_hl_tabs = 0;
+	}
+}
+
+int
+show_hist(struct tab *t, struct karg *args)
+{
+	char			*header, *body, *footer, *page, *tmp;
+	struct history		*h;
+	int			i = 1; /* all ids start 1 */
+
+	DNPRINTF(XT_D_CMD, "%s", __func__);
+
+	if (t == NULL)
+		errx(1, "%s: null tab", __func__);
+
+	/* mark this tab as history manager */
+	t->xtp_meaning = XT_XTP_TAB_MEANING_HISTORY;
+
+	/* Generate a new session key */
+	if (!updating_hl_tabs)
+		generate_xtp_session_key(&hl_session_key);
+
+	/* header */
+	header = g_strdup_printf(XT_DOCTYPE XT_HTML_TAG "\n<head>"
+	    "<title>History</title>\n"
+	    "%s"
+	    "</head>"
+	    "<h1>History</h1>\n",
+	    XT_PAGE_STYLE);
+
+	/* body */
+	body = g_strdup_printf("<div align='center'><table><tr>"
+	    "<th>URI</th><th>Title</th><th style='width: 15%%'>Remove</th></tr>\n");
+
+	RB_FOREACH_REVERSE(h, history_list, &hl) {
+		tmp = body;
+		body = g_strdup_printf(
+		    "%s\n<tr>"
+		    "<td><a href='%s'>%s</a></td>"
+		    "<td>%s</td>"
+		    "<td style='text-align: center'>"
+		    "<a href='%s%d/%s/%d/%d'>X</a></td></tr>\n",
+		    body, h->uri, h->uri, h->title,
+		    XT_XTP_STR, XT_XTP_HL, hl_session_key,
+		    XT_XTP_HL_REMOVE, i ++);
+
+		g_free(tmp);
+		i ++;
+	}
+
+	/* small message if there are none */
+	if (i == 1) {
+		tmp = body;
+		body = g_strdup_printf("%s\n<tr><td style='text-align:center'"
+		    "colspan='3'>No History</td></tr>\n", body);
+		g_free(tmp);
+	}
+
+	/* footer */
+	footer = g_strdup_printf("</table></div></body></html>");
+
+	page = g_strdup_printf("%s%s%s", header, body, footer);
+
+	/*
+	 * update all history manager tabs as the xtp session
+	 * key has now changed. No need to update the current tab.
+	 * Already did that above.
+	 */
+	update_history_tabs(t);
+
+	g_free(header);
+	g_free(body);
+	g_free(footer);
+
+	webkit_web_view_load_string(t->wv, page, "text/html", "UTF-8", "");
+	g_free(page);
+
+	return (0);
+}
+
+/*
+ * Generate a web page detailing the status of any downloads
+ */
+int
+dlman(struct tab *t, struct karg *args)
+{
+	struct download		*dl;
+	char			*header, *body, *footer, *page, *tmp;
+	char			*ref;
+	int			n_dl = 1;
+
+	DNPRINTF(XT_D_DOWNLOAD, "%s", __func__);
+
+	if (t == NULL)
+		errx(1, "%s: null tab", __func__);
+
+	/* mark as a download manager tab */
+	t->xtp_meaning = XT_XTP_TAB_MEANING_DOWNLOAD;
+
+	/*
+	 * Generate a new session key for next dlman instance.
+	 * This only happens for the top level call to dlman(),
+	 * in which case updating_dl_tabs is 0.
+	 */
+	if (!updating_dl_tabs)
+		generate_xtp_session_key(&dl_session_key);
+
+	/* header - with refresh so as to update */
+	if (refresh_interval >= 1)
+		ref = g_strdup_printf(
+		    "<meta http-equiv='refresh' content='%u"
+		    ";url=%s%d/%s/%d' />\n",
+		    refresh_interval,
+		    XT_XTP_STR,
+		    XT_XTP_DL,
+		    dl_session_key,
+		    XT_XTP_DL_LIST);
+		else
+			ref = g_strdup("");
+
+
+	header = g_strdup_printf(
+	    "%s\n<head>"
+	    "<title>Downloads</title>\n%s%s</head>\n",
+	    XT_DOCTYPE XT_HTML_TAG,
+	    ref,
+	    XT_PAGE_STYLE);
+
+	body = g_strdup_printf("<body><h1>Downloads</h1><div align='center'>"
+	    "<p>\n<a href='%s%d/%s/%d'>\n[ Refresh Downloads ]</a>\n"
+	    "</p><table><tr><th style='width: 60%%'>"
+	    "File</th>\n<th>Progress</th><th>Command</th></tr>\n",
+	    XT_XTP_STR, XT_XTP_DL, dl_session_key, XT_XTP_DL_LIST);
+
+	RB_FOREACH_REVERSE(dl, download_list, &downloads) {
+		body = dlman_table_row(body, dl);
+		n_dl ++;
+	}
+
+	/* message if no downloads in list */
+	if (n_dl == 1) {
+		tmp = body;
+		body = g_strdup_printf("%s\n<tr><td colspan='3'"
+		    " style='text-align: center'>"
+		    "No downloads</td></tr>\n", body);
+		g_free(tmp);
+	}
+
+	/* footer */
+	footer = g_strdup_printf("</table></div></body></html>");
+
+	page = g_strdup_printf("%s%s%s", header, body, footer);
+
+
+	/*
+	 * update all download manager tabs as the xtp session
+	 * key has now changed. No need to update the current tab.
+	 * Already did that above.
+	 *
+	 *
+	 */
+	update_download_tabs(t);
+
+	g_free(ref);
+	g_free(header);
+	g_free(body);
+	g_free(footer);
+
+	webkit_web_view_load_string(t->wv, page, "text/html", "UTF-8", "");
+	g_free(page);
+
+	return (0);
+}
+
 int
 search(struct tab *t, struct karg *args)
 {
@@ -1156,8 +1807,15 @@ search(struct tab *t, struct karg *args)
 
 	if (t == NULL || args == NULL)
 		errx(1, "search");
-	if (t->search_text == NULL)
-		return (XT_CB_PASSTHROUGH);
+	if (t->search_text == NULL) {
+		if (global_search == NULL)
+			return (XT_CB_PASSTHROUGH);
+		else {
+			t->search_text = g_strdup(global_search);
+			webkit_web_view_mark_text_matches(t->wv, global_search, FALSE, 0);
+			webkit_web_view_set_highlight_text_matches(t->wv, TRUE);
+		}
+	}
 
 	DNPRINTF(XT_D_CMD, "search: tab %d opc %d forw %d text %s\n",
 	    t->tab_id, args->i, t->search_forward, t->search_text);
@@ -1281,7 +1939,28 @@ done:
 	return (XT_CB_PASSTHROUGH);
 }
 
+/*
+ * Make a hardcopy of the page
+ */
+int
+print_page(struct tab *t, struct karg *args)
+{
+	WebKitWebFrame			*frame;
+
+	DNPRINTF(XT_D_PRINTING, "%s:", __func__);
+
+	/*
+	 * for now we just call the GTK print box,
+	 * but later we might decide to hook in a command.
+	 */
+	frame = webkit_web_view_get_main_frame(t->wv);
+	webkit_web_frame_print(frame);
+
+	return (0);
+}
+
 /* inherent to GTK not all keys will be caught at all times */
+/* XXX sort key bindings */
 struct key {
 	guint		mask;
 	guint		modkey;
@@ -1289,10 +1968,14 @@ struct key {
 	int		(*func)(struct tab *, struct karg *);
 	struct karg	arg;
 } keys[] = {
+	{ GDK_MOD1_MASK,	0,	GDK_d,		dlman,		{0} },
+	{ GDK_CONTROL_MASK,	0,	GDK_h,		show_hist,	{0} },
+	{ GDK_CONTROL_MASK,	0,	GDK_p,		print_page,	{0}},
 	{ 0,			0,	GDK_slash,	command,	{.i = '/'} },
 	{ GDK_SHIFT_MASK,	0,	GDK_question,	command,	{.i = '?'} },
 	{ GDK_SHIFT_MASK,	0,	GDK_colon,	command,	{.i = ':'} },
 	{ GDK_CONTROL_MASK,	0,	GDK_q,		quit,		{0} },
+	{ GDK_CONTROL_MASK,	0,	GDK_j,		toggle_js,	{0} },
 
 	/* search */
 	{ 0,			0,	GDK_n,		search,		{.i = XT_SEARCH_NEXT} },
@@ -1313,6 +1996,7 @@ struct key {
 	{ 0,			0,	GDK_F5,		navaction,	{.i = XT_NAV_RELOAD} },
 	{ GDK_CONTROL_MASK,	0,	GDK_r,		navaction,	{.i = XT_NAV_RELOAD} },
 	{ GDK_CONTROL_MASK,	0,	GDK_l,		navaction,	{.i = XT_NAV_RELOAD} },
+	{ GDK_CONTROL_MASK,	0,	GDK_f,		favorites,	{0} }, /* XXX make it work in edit boxes */
 
 	/* vertical movement */
 	{ 0,			0,	GDK_j,		move,		{.i = XT_MOVE_DOWN} },
@@ -1372,8 +2056,13 @@ struct cmd {
 	/* favorites */
 	{ "fav",		0,	favorites,		{0} },
 	{ "favadd",		0,	favadd,			{0} },
+	{ "dl"		,	0,	dlman,			{0} },
+	{ "h"		,	0,	show_hist,		{0} },
+	{ "hist"	,	0,	show_hist,		{0} },
+	{ "history"	,	0,	show_hist,		{0} },
 
 	{ "1",			0,	move,			{.i = XT_MOVE_TOP} },
+	{ "print",		0,	print_page,		{0} },
 
 	/* tabs */
 	{ "o",			1,	tabaction,		{.i = XT_TAB_OPEN} },
@@ -1403,7 +2092,7 @@ struct cmd {
 };
 
 gboolean
-tab_close_cb(GtkWidget *button, struct tab *t)
+tab_close_cb(GtkWidget *event_box, GdkEventButton *event, struct tab *t)
 {
 	DNPRINTF(XT_D_TAB, "tab_close_cb: tab %d\n", t->tab_id);
 
@@ -1426,6 +2115,163 @@ focus_uri_entry_cb(GtkWidget* w, GtkDirectionType direction, struct tab *t)
 		gtk_widget_grab_focus(GTK_WIDGET(t->wv));
 }
 
+/*
+ * cancel, remove, etc. downloads
+ */
+void
+dlman_ctrl(struct tab *t, uint8_t cmd, int id)
+{
+	struct download		find, *d;
+
+	DNPRINTF(XT_D_DOWNLOAD, "download control: cmd %d, id %d\n", cmd, id);
+
+	/* some commands require a valid download id */
+	if (cmd != XT_XTP_DL_LIST) {
+		/* lookup download in question */
+		find.id = id;
+		d = RB_FIND(download_list, &downloads, &find);
+
+		if (d == NULL) {
+			warn("%s: no such download", __func__);
+			return;
+		}
+	}
+
+	/* decide what to do */
+	switch (cmd) {
+	case XT_XTP_DL_CANCEL:
+		webkit_download_cancel(d->download);
+		break;
+	case XT_XTP_DL_REMOVE:
+		webkit_download_cancel(d->download); /* just incase */
+		g_object_unref(d->download);
+		RB_REMOVE(download_list, &downloads, d);
+		break;
+	case XT_XTP_DL_LIST:
+		/* Nothing, just dlman() below */
+		break;
+	default:
+		warn("%s: unknown command", __func__);
+		break;
+	};
+	dlman(t, NULL);
+}
+
+/*
+ * Actions on history, only does one thing for now, but
+ * we provide the function for future actions
+ */
+void
+hl_ctrl(struct tab *t, uint8_t cmd, int id)
+{
+	struct history		*h, *next;
+	int			i = 1;
+
+	switch (cmd) {
+	case XT_XTP_HL_REMOVE:
+		/* walk backwards, as listed in reverse */
+		for (h = RB_MAX(history_list, &hl); h != NULL; h = next) {
+			next = RB_PREV(history_list, &hl, h);
+			if (id == i) {
+				RB_REMOVE(history_list, &hl, h);
+				g_free((gpointer) h->title);
+				g_free((gpointer) h->uri);
+				g_free(h);
+				break;
+			}
+			i ++;
+		}
+		break;
+	case XT_XTP_HL_LIST:
+		/* Nothing - just show_hist() below */
+		break;
+	default:
+		warn("%s: unknown command", __func__);
+		break;
+	};
+
+	show_hist(t, NULL);
+}
+
+
+/*
+ * is the url xtp protocol? (xxxt://)
+ * if so, parse and despatch correct bahvior
+ */
+int
+parse_xtp_url(struct tab *t, const char *url)
+{
+	char		*dup = NULL, *p, *last;
+	uint8_t		n_tokens = 0;
+	char		*tokens[4] = {NULL, NULL, NULL, ""};
+
+	/* tokens array meaning:
+	 *   tokens[0] = class
+	 *   tokens[1] = session key
+	 *   tokens[2] = action
+	 *   tokens[3] = optional argument
+	 */
+
+	DNPRINTF(XT_D_URL, "%s: url %s\n", __func__, url);
+
+	/*xtp tab meaning is normal unless proven special */
+	t->xtp_meaning = XT_XTP_TAB_MEANING_NORMAL;
+
+	if (strncmp(url, XT_XTP_STR, strlen(XT_XTP_STR)))
+		return 0;
+
+	dup = g_strdup(url + strlen(XT_XTP_STR));
+
+	/* split out the url */
+	for ((p = strtok_r(dup, "/", &last)); p;
+	    (p = strtok_r(NULL, "/", &last))) {
+		if (n_tokens < 4)
+			tokens[n_tokens++] = p;
+	}
+
+	/* should be atleast three fields 'class/seskey/command/arg' */
+	if (n_tokens < 3)
+		return 0;
+
+	switch (atoi(tokens[0])) {
+	/* if a download XTP url */
+	case XT_XTP_DL:
+
+		/* validate session key */
+		if (!validate_xtp_session_key(dl_session_key, tokens[1])) {
+			warn("%s: invalid download session key", __func__);
+			return (1);
+		}
+
+		dlman_ctrl(t, atoi(tokens[2]), atoi(tokens[3]));
+
+	/* if a history XTP url */
+		break;
+	case XT_XTP_HL:
+
+		/* validate session key */
+		if (!validate_xtp_session_key(hl_session_key, tokens[1])) {
+			warn("%s: invalid history session key", __func__);
+			return (1);
+		}
+
+		hl_ctrl(t, atoi(tokens[2]), atoi(tokens[3]));
+
+		break;
+
+	default:/* unsupported class */
+		warn("%s: unsupported class: %s", __func__, tokens[0]);
+		break;
+	}
+
+	if (dup)
+		g_free(dup);
+
+	return 1;
+}
+
+
+
 void
 activate_uri_entry_cb(GtkWidget* entry, struct tab *t)
 {
@@ -1442,13 +2288,16 @@ activate_uri_entry_cb(GtkWidget* entry, struct tab *t)
 
 	uri += strspn(uri, "\t ");
 
-	if (valid_url_type((char *)uri)) {
-		newuri = guess_url_type((char *)uri);
-		uri = newuri;
-	}
+	/* if xxxt:// treat specially */
+	if (!parse_xtp_url(t, uri)) {
+		if (valid_url_type((char *)uri)) {
+			newuri = guess_url_type((char *)uri);
+			uri = newuri;
+		}
 
-	webkit_web_view_load_uri(t->wv, uri);
-	gtk_widget_grab_focus(GTK_WIDGET(t->wv));
+		webkit_web_view_load_uri(t->wv, uri);
+		gtk_widget_grab_focus(GTK_WIDGET(t->wv));
+	}
 
 	if (newuri)
 		g_free(newuri);
@@ -1480,30 +2329,70 @@ activate_search_entry_cb(GtkWidget* entry, struct tab *t)
 }
 
 void
+check_and_set_js(gchar *uri, struct tab *t)
+{
+	struct domain		*d = NULL;
+	int			es = 0;
+
+	if (uri == NULL || t == NULL)
+		return;
+
+	if ((d = wl_find_uri(uri, &js_wl)) == NULL)
+		es = 0;
+	else
+		es = 1;
+
+	DNPRINTF(XT_D_JS, "check_and_set_js: %s %s\n",
+	    es ? "enable" : "disable", uri);
+
+	g_object_set((GObject *)t->settings,
+	    "enable-scripts", es, (char *)NULL);
+	webkit_web_view_set_settings(t->wv, t->settings);
+}
+
+void
 notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 {
 	GdkColor		color;
 	WebKitWebFrame		*frame;
-	const gchar		*uri;
+	const gchar		*set = NULL, *uri = NULL, *title = NULL;
+	struct history		*h, find;
+	int			add = 0;
+
+	DNPRINTF(XT_D_URL, "notify_load_status_cb: %d\n",
+	    webkit_web_view_get_load_status(wview));
 
 	if (t == NULL)
 		errx(1, "notify_load_status_cb");
 
 	switch (webkit_web_view_get_load_status(wview)) {
-	case WEBKIT_LOAD_COMMITTED:
+	case WEBKIT_LOAD_PROVISIONAL:
+#if GTK_CHECK_VERSION(2, 20, 0)
 		gtk_widget_show(t->spinner);
-		gtk_spinner_start(t->spinner);
-		frame = webkit_web_view_get_main_frame(wview);
-		uri = webkit_web_frame_get_uri(frame);
-		if (uri)
-			gtk_entry_set_text(GTK_ENTRY(t->uri_entry), uri);
+		gtk_spinner_start(GTK_SPINNER(t->spinner));
+#endif
+		gtk_label_set_text(GTK_LABEL(t->label), "Loading");
 
 		gtk_widget_set_sensitive(GTK_WIDGET(t->stop), TRUE);
 		t->focus_wv = 1;
+		/* check if js white listing is enabled */
+		if (enable_js_whitelist) {
+			frame = webkit_web_view_get_main_frame(wview);
+			uri = webkit_web_frame_get_uri(frame);
+			check_and_set_js((gchar *)uri, t);
+		}
 
 		/* take focus if we are visible */
 		if (gtk_notebook_get_current_page(notebook) == t->tab_id)
 			gtk_widget_grab_focus(GTK_WIDGET(t->wv));
+
+		break;
+
+	case WEBKIT_LOAD_COMMITTED:
+		frame = webkit_web_view_get_main_frame(wview);
+		uri = webkit_web_frame_get_uri(frame);
+		if (uri)
+			gtk_entry_set_text(GTK_ENTRY(t->uri_entry), uri);
 
 		/* color uri_entry */
 		if (uri && !strncmp(uri, "https://", strlen("https://")))
@@ -1515,23 +2404,51 @@ notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 		break;
 
 	case WEBKIT_LOAD_FIRST_VISUALLY_NON_EMPTY_LAYOUT:
-		uri = webkit_web_view_get_title(wview);
-		if (uri == NULL) {
-			frame = webkit_web_view_get_main_frame(wview);
-			uri = webkit_web_frame_get_uri(frame);
+		title = webkit_web_view_get_title(wview);
+		frame = webkit_web_view_get_main_frame(wview);
+		uri = webkit_web_frame_get_uri(frame);
+		if (title)
+			set = title;
+		else if (uri)
+			set = uri;
+		else
+			break;
+
+		gtk_label_set_text(GTK_LABEL(t->label), set);
+		gtk_window_set_title(GTK_WINDOW(main_window), set);
+
+		if (uri) {
+			if (!strncmp(uri, "http://", strlen("http://")) ||
+			    !strncmp(uri, "https://", strlen("https://")) ||
+			    !strncmp(uri, "file://", strlen("file://")))
+				add = 1;
+			if (add == 0)
+				break;
+			find.uri = uri;
+			h = RB_FIND(history_list, &hl, &find);
+			if (h)
+				break;
+
+			h = g_malloc(sizeof *h);
+			h->uri = g_strdup(uri);
+			if (title)
+				h->title = g_strdup(title);
+			else
+				h->title = g_strdup(uri);
+			RB_INSERT(history_list, &hl, h);
+			update_history_tabs(NULL);
 		}
-		gtk_label_set_text(GTK_LABEL(t->label), uri);
-		gtk_window_set_title(GTK_WINDOW(main_window), uri);
 
 		break;
 
-	case WEBKIT_LOAD_PROVISIONAL:
 	case WEBKIT_LOAD_FINISHED:
 #if WEBKIT_CHECK_VERSION(1, 1, 18)
 	case WEBKIT_LOAD_FAILED:
 #endif
-		gtk_spinner_stop(t->spinner);
+#if GTK_CHECK_VERSION(2, 20, 0)
+		gtk_spinner_stop(GTK_SPINNER(t->spinner));
 		gtk_widget_hide(t->spinner);
+#endif
 	default:
 		gtk_widget_set_sensitive(GTK_WIDGET(t->stop), FALSE);
 		break;
@@ -1593,7 +2510,8 @@ webview_npd_cb(WebKitWebView *wv, WebKitWebFrame *wf,
 	    webkit_network_request_get_uri(request));
 
 	uri = (char *)webkit_network_request_get_uri(request);
-	if (t->ctrl_click) {
+
+	if ((!parse_xtp_url(t, uri) && (t->ctrl_click))) {
 		t->ctrl_click = 0;
 		create_new_tab(uri, ctrl_click_focus);
 		webkit_web_policy_decision_ignore(pd);
@@ -1692,31 +2610,54 @@ webview_mimetype_cb(WebKitWebView *wv, WebKitWebFrame *frame,
 }
 
 int
-webview_download_cb(WebKitWebView *wv, WebKitDownload *download, struct tab *t)
+webview_download_cb(WebKitWebView *wv, WebKitDownload *wk_download, struct tab *t)
 {
 	const gchar		*filename;
 	char			*uri = NULL;
+	struct download		*download_entry;
+	int			ret = TRUE;
 
-	if (download == NULL || t == NULL)
-		errx(1, "webview_download_cb: invalid pointers");
+	if (wk_download == NULL || t == NULL)
+		errx(1, "%s: invalid pointers", __func__);
 
-	filename = webkit_download_get_suggested_filename(download);
+	filename = webkit_download_get_suggested_filename(wk_download);
 	if (filename == NULL)
 		return (FALSE); /* abort download */
 
 	uri = g_strdup_printf("file://%s/%s", download_dir, filename);
 
-	DNPRINTF(XT_D_DOWNLOAD, "webview_download_cb: tab %d filename %s "
-	    "local %s\n",
-	    t->tab_id, filename, uri);
+	DNPRINTF(XT_D_DOWNLOAD, "%s: tab %d filename %s "
+	    "local %s\n", __func__, t->tab_id, filename, uri);
 
-	webkit_download_set_destination_uri(download, uri);
-	webkit_download_start(download);
+	webkit_download_set_destination_uri(wk_download, uri);
+
+	if (webkit_download_get_status(wk_download) ==
+	    WEBKIT_DOWNLOAD_STATUS_ERROR) {
+		warn("%s: download failed to start", __func__);
+		ret = FALSE;
+		gtk_label_set_text(GTK_LABEL(t->label), "Download Failed");
+	} else {
+		download_entry = g_malloc(sizeof(struct download));
+		download_entry->download = wk_download;
+		download_entry->tab = t;
+		download_entry->id = next_download_id ++;
+		RB_INSERT(download_list, &downloads, download_entry);
+		/* get from history */
+		g_object_ref(wk_download);
+		gtk_label_set_text(GTK_LABEL(t->label), "Downloading");
+	}
 
 	if (uri)
 		g_free(uri);
 
-	return (TRUE); /* start download */
+	/* sync other download manager tabs */
+	update_download_tabs(NULL);
+
+	/*
+	 * NOTE: never redirect/render the current tab before this
+	 * function returns. This will cause the download to never start.
+	 */
+	return (ret); /* start download */
 }
 
 /* XXX currently unused */
@@ -2044,6 +2985,9 @@ cmd_activate_cb(GtkEntry *entry, struct tab *t)
 		}
 
 		t->search_text = g_strdup(s);
+		if (global_search)
+			g_free(global_search);
+		global_search = g_strdup(s);
 		t->search_forward = c[0] == '/';
 
 		goto done;
@@ -2155,7 +3099,8 @@ create_browser(struct tab *t)
 	/* set defaults */
 	t->settings = webkit_web_settings_new();
 
-	g_object_get((GObject *)t->settings, "user-agent", &strval, (char *)NULL);
+	g_object_get((GObject *)t->settings, "user-agent", &strval,
+	    (char *)NULL);
 	t->user_agent = g_strdup_printf("%s %s+", strval, version);
 	g_free(strval);
 
@@ -2284,7 +3229,7 @@ create_new_tab(char *title, int focus)
 	struct tab		*t;
 	int			load = 1;
 	char			*newuri = NULL;
-	GtkWidget		*image, *b, *button;
+	GtkWidget		*image, *b, *event_box;
 
 	DNPRINTF(XT_D_TAB, "create_new_tab: title %s focus %d\n", title, focus);
 
@@ -2310,17 +3255,19 @@ create_new_tab(char *title, int focus)
 
 	/* label + button for tab */
 	b = gtk_hbox_new(FALSE, 0);
+#if GTK_CHECK_VERSION(2, 20, 0)
 	t->spinner = gtk_spinner_new ();
+#endif
 	t->label = gtk_label_new(title);
 	image = gtk_image_new_from_stock(GTK_STOCK_CLOSE, GTK_ICON_SIZE_MENU);
-	button = gtk_button_new();
-	gtk_button_set_image(GTK_BUTTON(button), image);
-	gtk_button_set_relief(GTK_BUTTON(button), GTK_RELIEF_NONE);
-	gtk_button_set_focus_on_click(GTK_BUTTON(button), FALSE);
+	event_box = gtk_event_box_new();
+	gtk_container_add(GTK_CONTAINER(event_box), image);
 	gtk_widget_set_size_request(t->label, 100, -1);
+#if GTK_CHECK_VERSION(2, 20, 0)
 	gtk_box_pack_start(GTK_BOX(b), t->spinner, FALSE, FALSE, 0);
+#endif
 	gtk_box_pack_start(GTK_BOX(b), t->label, FALSE, FALSE, 0);
-	gtk_box_pack_start(GTK_BOX(b), button, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(b), event_box, FALSE, FALSE, 0);
 
 	/* toolbar */
 	t->toolbar = create_toolbar(t);
@@ -2336,15 +3283,21 @@ create_new_tab(char *title, int focus)
 	gtk_entry_set_has_frame(GTK_ENTRY(t->cmd), FALSE);
 	gtk_box_pack_end(GTK_BOX(t->vbox), t->cmd, FALSE, FALSE, 0);
 
+	/* xtp meaning is normal by default */
+	t->xtp_meaning = XT_XTP_TAB_MEANING_NORMAL;
+
 	/* and show it all */
 	gtk_widget_show_all(b);
 	gtk_widget_show_all(t->vbox);
 	t->tab_id = gtk_notebook_append_page(notebook, t->vbox, b);
 
-	/* hide spinner for now */
-	gtk_spinner_stop(t->spinner);
-	gtk_widget_hide(t->spinner);
-
+#if GTK_CHECK_VERSION(2, 20, 0)
+	/* turn spinner off if we are a new tab without uri */
+	if (!load) {
+		gtk_spinner_stop(GTK_SPINNER(t->spinner));
+		gtk_widget_hide(t->spinner);
+	}
+#endif
 	/* make notebook tabs reorderable */
 	gtk_notebook_set_tab_reorderable(notebook, t->vbox, TRUE);
 
@@ -2378,7 +3331,7 @@ create_new_tab(char *title, int focus)
 	g_signal_connect(G_OBJECT(t->uri_entry), "focus",
 	    G_CALLBACK(focus_uri_entry_cb), t);
 
-	g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(tab_close_cb), t);
+	g_signal_connect(G_OBJECT(event_box), "button_press_event", G_CALLBACK(tab_close_cb), t);
 
 	/* hide stuff */
 	gtk_widget_hide(t->cmd);
@@ -2448,20 +3401,88 @@ create_canvas(void)
 }
 
 void
-setup_cookies(char *file)
+print_cookie(char *msg, SoupCookie *c)
 {
-	if (cookiejar) {
-		soup_session_remove_feature(session,
-		    (SoupSessionFeature*)cookiejar);
-		g_object_unref(cookiejar);
-		cookiejar = NULL;
-	}
-
-	if (cookies_enabled == 0)
+	if (c == NULL)
 		return;
 
-	cookiejar = soup_cookie_jar_text_new(file, read_only_cookies);
-	soup_session_add_feature(session, (SoupSessionFeature*)cookiejar);
+	if (msg)
+		DNPRINTF(XT_D_COOKIE, "%s\n", msg);
+	DNPRINTF(XT_D_COOKIE, "name     : %s\n", c->name);
+	DNPRINTF(XT_D_COOKIE, "value    : %s\n", c->value);
+	DNPRINTF(XT_D_COOKIE, "domain   : %s\n", c->domain);
+	DNPRINTF(XT_D_COOKIE, "path     : %s\n", c->path);
+	DNPRINTF(XT_D_COOKIE, "expires  : %s\n",
+	    c->expires ? soup_date_to_string(c->expires, SOUP_DATE_HTTP) : "");
+	DNPRINTF(XT_D_COOKIE, "secure   : %d\n", c->secure);
+	DNPRINTF(XT_D_COOKIE, "http_only: %d\n", c->http_only);
+	DNPRINTF(XT_D_COOKIE, "====================================\n");
+}
+
+void
+cookiejar_changed_cb(SoupCookieJar *jar, SoupCookie *old_cookie,
+    SoupCookie *new_cookie, gpointer user_data)
+{
+	SoupCookieJarClass	*p;
+	struct domain		*d = NULL;
+	void			(*hook)(SoupCookieJar *, SoupCookie *,
+				    SoupCookie *, gpointer);
+
+	if (new_cookie) {
+		if ((d = wl_find(new_cookie->domain, &c_wl)) == NULL) {
+			DNPRINTF(XT_D_COOKIE,
+			    "cookiejar_changed_cb: reject %s\n",
+			    new_cookie->domain);
+			return;
+		}
+
+		print_cookie("old_cookie", old_cookie);
+		print_cookie("new_cookie", new_cookie);
+		if (new_cookie->expires == NULL && session_timeout) {
+			soup_cookie_set_expires(new_cookie,
+			    soup_date_new_from_now(session_timeout));
+			print_cookie("modified new_cookie", new_cookie);
+		}
+	}
+
+	/* call original function to do it's magic */
+	p = SOUP_COOKIE_JAR_GET_CLASS(p_cookiejar);
+	hook = (void *)(p->_libsoup_reserved3);
+	hook(jar, old_cookie, new_cookie, NULL);
+}
+
+void
+setup_cookies(char *file)
+{
+	SoupCookieJarClass	*p;
+
+	/*
+	 * First I'd like to apologize for what you are about to see.
+	 * The issue really is a flaw in libsoup which doesn't let us
+	 * hook the "changed" callback properly.  It lets us hook it
+	 * but there is no way to halt execution because of the void
+	 * return type.
+	 *
+	 * To work around this we mess with the class pointers themselves
+	 * and do our thing.  In our new function we'll determine if we
+	 * want to continue execution.
+	 *
+	 * Evil, check.  Ugly, check.  Prone to failure, check.
+	 * Probably a better way of doing this, check!
+	 *
+	 * I'll take a diff if someone knows how to do this within the gtk
+	 * framework.
+	 */
+
+	p_cookiejar = soup_cookie_jar_text_new(file, read_only_cookies);
+	if (enable_cookie_whitelist) {
+		p = SOUP_COOKIE_JAR_GET_CLASS(p_cookiejar);
+		p->_libsoup_reserved3 = (void *)(p->changed);
+		p->changed = (void *)(cookiejar_changed_cb);
+	}
+	g_object_set(G_OBJECT(p_cookiejar), SOUP_COOKIE_JAR_ACCEPT_POLICY,
+	    cookie_policy, (void *)NULL);
+	soup_session_add_feature(session, (SoupSessionFeature*)p_cookiejar);
 }
 
 void
@@ -2531,6 +3552,13 @@ main(int argc, char *argv[])
 	argv += optind;
 
 	TAILQ_INIT(&tabs);
+	RB_INIT(&hl);
+	RB_INIT(&js_wl);
+	RB_INIT(&downloads);
+
+	/* generate session keys for xtp pages */
+	generate_xtp_session_key(&dl_session_key);
+	generate_xtp_session_key(&hl_session_key);
 
 	/* prepare gtk */
 	gtk_init(&argc, &argv);

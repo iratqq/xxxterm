@@ -1,4 +1,4 @@
-# $xxxterm: Makefile,v 1.8 2010/08/18 22:47:37 todd Exp $
+# $xxxterm: Makefile,v 1.7 2010/08/12 15:15:46 marco Exp $
 
 PREFIX?=/usr/local
 BINDIR=${PREFIX}/bin
@@ -15,7 +15,7 @@ LIBS+= webkit-1.0
 LIBS+= libsoup-2.4
 GTK_CFLAGS!= pkg-config --cflags $(LIBS)
 GTK_LDFLAGS!= pkg-config --libs $(LIBS)
-CFLAGS+= -I. $(GTK_CFLAGS) -Wall -pthread
+CFLAGS+= $(GTK_CFLAGS) -Wall -pthread
 LDFLAGS+= $(GTK_LDFLAGS) -pthread
 
 MANDIR= ${PREFIX}/man/cat
@@ -24,7 +24,7 @@ CLEANFILES += javascript.h
 
 javascript.h: hinting.js input-focus.js
 	perl ${.CURDIR}/js-merge-helper.pl ${.CURDIR}/hinting.js \
-	    ${.CURDIR}/input-focus.js >  javascript.h
+	    ${.CURDIR}/input-focus.js >  ${.CURDIR}/javascript.h
 
 
 #tables.h: ${.CURDIR}/../tables ${.CURDIR}/../parsedb.pl

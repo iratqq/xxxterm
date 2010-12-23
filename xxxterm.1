@@ -1,4 +1,4 @@
-.\"	$xxxterm: xxxterm.1,v 1.14 2010/08/12 18:14:54 marco Exp $
+.\"	$xxxterm: xxxterm.1,v 1.23 2010/12/22 23:18:16 marco Exp $
 .\"
 .\" Copyright (c) 2010 Marco Peereboom <marco@peereboom.us>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: August 12 2010 $
+.Dd $Mdocdate: December 22 2010 $
 .Dt XXXTERM 1
 .Os
 .Sh NAME
@@ -129,6 +129,31 @@ validates that during startup.
 .It Cm fancy_bar
 Enables a backward, forward and stop button to the toolbar.
 Additionally if search_string is set it'll enable an entry box for searches.
+.It Cm refresh_interval
+Refresh interval while in the download manager.
+Default is 10.
+.It Cm session_timeout
+If this value is greater than 3600 then it is the time added in seconds to a
+session cookie.  If the value is smaller than 3600 then there is no change
+to the expiration of a session cookie.
+.It Cm enable_cookie_white list
+When enabled all cookies must be in the white list or they are rejected.
+.It Cm cookie_wl
+This is a cookie white list item.
+Use multiple times to add multiple entries.
+Valid entries are for example *.moo.com and the equivalent .moo.com.
+A fully qualified host is also valid and is for example www.moo.com.
+.It Cm cookie_policy
+This field delineates the cookie policy.
+Possible values are: no3rdparty, reject 3rd party cookies.
+accept, accept all cookies.
+reject, reject all cookies.
+.It Cm enable_js_whitelist
+When enabled all domains must be in the js white list in order to run javascript.
+NOTE: Make sure enable_scripts is set to 0.
+.It Cm js_wl
+This is a javascript white list item.
+See cookie_wl for semantics and more details.
 .It Cm search_string
 Default search engine string.
 See xxxterm.conf file for details.
@@ -218,6 +243,16 @@ Page left
 Page far right
 .It Cm 0
 Page far left
+.It Cm C-f
+Favorites
+.It Cm M-d
+Download manager
+.It Cm C-p
+Print page
+.It Cm C-h
+Global history
+.It Cm C-j
+Toggle javascript enabled for domain.
 .El
 .Pp
 Tab Manipulation:
@@ -235,7 +270,7 @@ Shrink font size by one point.
 Grow font size by one point.
 .El
 .Pp
-Mouse-less browsing:
+Mouse-less browsing (a.k.a. link following):
 .Pp
 .Bl -tag -width "tabnew, tabedit, tabe [URI]" -offset indent -compact
 .It Cm f
@@ -268,6 +303,12 @@ Quit
 Show favorites
 .It Cm favadd
 Add current page to favorites
+.It Cm dl
+Show download manager
+.It Cm print
+Print page
+.It Cm h, hist, history
+Global history
 .It Cm help
 Show help file.
 .It Cm open, op, o <URI>
@@ -302,4 +343,6 @@ was inspired by vimprobable2 and the bloat in other UNIX web browsers.
 .Pp
 .Nm
 was written by
-.An Marco Peereboom Aq marco@peereboom.us
+.An Marco Peereboom Aq marco@peereboom.us ,
+and
+.An Edd Barrett Aq vext01@gmail.com

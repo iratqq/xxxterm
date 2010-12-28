@@ -1,4 +1,4 @@
-.\"	$xxxterm: xxxterm.1,v 1.23 2010/12/22 23:18:16 marco Exp $
+.\"	$xxxterm: xxxterm.1,v 1.31 2010/12/26 23:42:50 marco Exp $
 .\"
 .\" Copyright (c) 2010 Marco Peereboom <marco@peereboom.us>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: December 22 2010 $
+.Dd $Mdocdate: December 26 2010 $
 .Dt XXXTERM 1
 .Os
 .Sh NAME
@@ -173,6 +173,15 @@ the alias on the address bar is substituted.
 For example, if g,http://www.google.com/search?q=%s is defined as an alias,
 then the URL http://www.google.com/search?q=foo is loaded when navigating to
 "g foo".
+.It Cm ssl_ca_file
+If set to a valid PEM file all server certificates will be validated against it.
+The URL bar will be colored green when the certificate is trusted and yellow when
+untrusted.
+.Pp
+If ssl_ca_file is not set then the URL bar will color all https connections red.
+.It Cm ssl_strict_certs
+If this value is set connections to untrusted sites will be aborted.
+This value is only used if ssl_ca_file is set.
 .El
 .Pp
 .Nm
@@ -243,16 +252,18 @@ Page left
 Page far right
 .It Cm 0
 Page far left
-.It Cm C-f
+.It Cm M-f
 Favorites
 .It Cm M-d
 Download manager
 .It Cm C-p
 Print page
-.It Cm C-h
+.It Cm M-h
 Global history
 .It Cm C-j
 Toggle javascript enabled for domain.
+.It Cm C-s
+Toggle source view.
 .El
 .Pp
 Tab Manipulation:
@@ -299,6 +310,16 @@ The commands and descriptions are listed below:
 .It Cm qa, qa!, q!
 Quit
 .Nm
+.It Cm w
+Save open tabs.
+The tabs will be restored next time
+.Nm
+is started.
+.It Cm wq, wq!
+Save open tabs and quit.
+The tabs will be restored next time
+.Nm
+is started.
 .It Cm fav
 Show favorites
 .It Cm favadd
@@ -310,7 +331,16 @@ Print page
 .It Cm h, hist, history
 Global history
 .It Cm help
-Show help file.
+Show help page.
+.It Cm home
+Go to home URL.
+.It Cm about, version
+Show about page.
+.It Cm cookies
+Show cookie jar contents.
+.It Cm stats
+Show blocked cookies statistics.
+These statistics vary based on settings and are not persistent.
 .It Cm open, op, o <URI>
 Open URI.
 .It Cm tabnew, tabedit, tabe [URI]

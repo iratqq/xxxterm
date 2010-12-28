@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.138 2010/12/22 23:21:05 vext01 Exp $ */
+/* $xxxterm: xxxterm.c,v 1.159 2010/12/27 07:03:11 marco Exp $ */
 /*
  * Copyright (c) 2010 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2010 Edd Barrett <vext01@gmail.com>
@@ -28,7 +28,6 @@
  *	autocompletion on various inputs
  *	create privacy browsing
  *		- encrypted local data
- *	add js whitelist
  */
 
 #include <stdio.h>
@@ -83,7 +82,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.138 2010/12/22 23:21:05 vext01 Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.159 2010/12/27 07:03:11 marco Exp $";
 
 /*#define XT_DEBUG*/
 #ifdef XT_DEBUG
@@ -141,6 +140,7 @@ struct tab {
 	GtkToolItem		*backward;
 	GtkToolItem		*forward;
 	GtkToolItem		*stop;
+	GtkToolItem		*js_toggle;
 	guint			tab_id;
 	WebKitWebView		*wv;
 
@@ -197,7 +197,7 @@ struct domain {
 };
 RB_HEAD(domain_list, domain);
 
-/* starts from 1 to catch atoi() failures when calling dlman_ctrl() */
+/* starts from 1 to catch atoi() failures when calling xtp_handle_dl() */
 int				next_download_id = 1;
 
 struct karg {
@@ -210,6 +210,7 @@ struct karg {
 #define XT_DIR			(".xxxterm")
 #define XT_CONF_FILE		("xxxterm.conf")
 #define XT_FAVS_FILE		("favorites")
+#define XT_SAVED_TABS_FILE	("saved_tabs")
 #define XT_CB_HANDLED		(TRUE)
 #define XT_CB_PASSTHROUGH	(FALSE)
 #define XT_DOCTYPE		"<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.0 Transitional//EN' 'http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd'>"
@@ -218,9 +219,8 @@ struct karg {
 #define XT_PAGE_STYLE		"<style type='text/css'>\n" \
 				"td {overflow: hidden;}\n"  \
 				"th {background-color: #cccccc}"  \
-				"table {width: 90%; border: 1px black"    \
+				"table {width: 90%%; border: 1px black"    \
 				" solid; table-layout: fixed}\n</style>\n\n"
-
 /* file sizes */
 #define SZ_KB		((uint64_t) 1024)
 #define SZ_MB		(SZ_KB * SZ_KB)
@@ -245,6 +245,8 @@ struct karg {
 /* XTP classes (xxxt://<class>) */
 #define XT_XTP_DL		1	/* downloads */
 #define XT_XTP_HL		2	/* history */
+#define XT_XTP_CL		3	/* cookies */
+#define XT_XTP_FL		4	/* favorites */
 
 /* XTP download actions */
 #define XT_XTP_DL_LIST		1
@@ -255,13 +257,20 @@ struct karg {
 #define XT_XTP_HL_LIST		1
 #define XT_XTP_HL_REMOVE	2
 
-/* XXX add favorites to xtp */
+/* XTP cookie actions */
+#define XT_XTP_CL_LIST		1
+#define XT_XTP_CL_REMOVE	2
+
+/* XTP cookie actions */
+#define XT_XTP_FL_LIST		1
+#define XT_XTP_FL_REMOVE	2
 
 /* xtp tab meanings  - identifies which tabs have xtp pages in */
 #define XT_XTP_TAB_MEANING_NORMAL	0 /* normal url */
-#define XT_XTP_TAB_MEANING_DOWNLOAD	1 /* download manager in this tab */
-#define XT_XTP_TAB_MEANING_FAVORITE	2 /* favorite manager in this tab */
-#define XT_XTP_TAB_MEANING_HISTORY	3 /* history manager in this tab */
+#define XT_XTP_TAB_MEANING_DL		1 /* download manager in this tab */
+#define XT_XTP_TAB_MEANING_FL		2 /* favorite manager in this tab */
+#define XT_XTP_TAB_MEANING_HL		3 /* history manager in this tab */
+#define XT_XTP_TAB_MEANING_CL		4 /* cookie manager in this tab */
 
 /* actions */
 #define XT_MOVE_INVALID		(0)
@@ -315,7 +324,10 @@ struct domain_list	c_wl;
 struct domain_list	js_wl;
 int			updating_dl_tabs = 0;
 int			updating_hl_tabs = 0;
+int			updating_cl_tabs = 0;
+int			updating_fl_tabs = 0;
 char			*global_search;
+uint64_t		blocked_cookies = 0;
 
 /* mime types */
 struct mime_type {
@@ -356,6 +368,9 @@ int			enable_cookie_whitelist = 1;
 int			enable_js_whitelist = 1;
 time_t			session_timeout = 3600; /* cookie session timeout */
 int			cookie_policy = SOUP_COOKIE_JAR_ACCEPT_NO_THIRD_PARTY;
+char			*ssl_ca_file = NULL;
+gboolean		ssl_strict_certs = FALSE;
+
 /*
  * Session IDs.
  * We use these to prevent people putting xxxt:// URLs on
@@ -366,6 +381,8 @@ int			cookie_policy = SOUP_COOKIE_JAR_ACCEPT_NO_THIRD_PARTY;
 	"%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx"
 char			*dl_session_key;	/* downloads */
 char			*hl_session_key;	/* history list */
+char			*cl_session_key;	/* cookie list */
+char			*fl_session_key;	/* favorites list */
 
 char			*home = "http://www.peereboom.us";
 char			*search_string = NULL;
@@ -386,8 +403,10 @@ void			delete_tab(struct tab *);
 void			adjustfont_webkit(struct tab *, int);
 int			run_script(struct tab *, char *);
 int			download_rb_cmp(struct download *, struct download *);
-int			show_hist(struct tab *t, struct karg *args);
-int			dlman(struct tab *t, struct karg *args);
+int			xtp_page_hl(struct tab *t, struct karg *args);
+int			xtp_page_dl(struct tab *t, struct karg *args);
+int			xtp_page_cl(struct tab *t, struct karg *args);
+int			xtp_page_fl(struct tab *t, struct karg *args);
 
 int
 history_rb_cmp(struct history *h1, struct history *h2)
@@ -504,6 +523,25 @@ guess_domainname(char *input)
 	}
 	free(str);
 	return ret;
+}
+
+void
+print_cookie(char *msg, SoupCookie *c)
+{
+	if (c == NULL)
+		return;
+
+	if (msg)
+		DNPRINTF(XT_D_COOKIE, "%s\n", msg);
+	DNPRINTF(XT_D_COOKIE, "name     : %s\n", c->name);
+	DNPRINTF(XT_D_COOKIE, "value    : %s\n", c->value);
+	DNPRINTF(XT_D_COOKIE, "domain   : %s\n", c->domain);
+	DNPRINTF(XT_D_COOKIE, "path     : %s\n", c->path);
+	DNPRINTF(XT_D_COOKIE, "expires  : %s\n",
+	    c->expires ? soup_date_to_string(c->expires, SOUP_DATE_HTTP) : "");
+	DNPRINTF(XT_D_COOKIE, "secure   : %d\n", c->secure);
+	DNPRINTF(XT_D_COOKIE, "http_only: %d\n", c->http_only);
+	DNPRINTF(XT_D_COOKIE, "====================================\n");
 }
 
 char *
@@ -864,10 +902,16 @@ config_parse(char *filename)
 			if (http_proxy)
 				g_free(http_proxy);
 			http_proxy = g_strdup(val);
-		} else if (!strcmp(var, "search_string")) {
+		} else if (!strcmp(var, "ssl_strict_certs"))
+			ssl_strict_certs = atoi(val);
+		else if (!strcmp(var, "search_string")) {
 			if (search_string)
 				g_free(search_string);
 			search_string = g_strdup(val);
+		} else if (!strcmp(var, "ssl_ca_file")) {
+			if (ssl_ca_file)
+				g_free(ssl_ca_file);
+			ssl_ca_file = g_strdup(val);
 		} else if (!strcmp(var, "download_dir")) {
 			if (val[0] == '~')
 				snprintf(download_dir, sizeof download_dir,
@@ -1006,6 +1050,75 @@ quit(struct tab *t, struct karg *args)
 }
 
 int
+restore_saved_tabs(void)
+{
+	char		file[PATH_MAX];
+	FILE		*f;
+	char		*line = NULL;
+	size_t		linelen;
+	int		empty_saved_tabs_file = 1;
+
+	snprintf(file, sizeof file, "%s/%s/%s",
+	    pwd->pw_dir, XT_DIR, XT_SAVED_TABS_FILE);
+
+	if ((f = fopen(file, "r")) == NULL)
+		return (empty_saved_tabs_file);
+
+	while (!feof(f)) {
+		line = fparseln(f, &linelen, NULL, NULL, 0);
+		if (line) {
+			create_new_tab(line, 1);
+			empty_saved_tabs_file = 0;
+		}
+		free(line);
+		line = NULL;
+	}
+
+	fclose(f);
+	/*remove(file);*/
+
+	return (empty_saved_tabs_file);
+}
+
+int
+save_tabs(struct tab *t, struct karg *args)
+{
+	char			file[PATH_MAX];
+	FILE			*f;
+	struct tab		*ti;
+	WebKitWebFrame		*frame;
+	const gchar		*uri;
+
+	snprintf(file, sizeof file, "%s/%s/%s",
+	    pwd->pw_dir, XT_DIR, XT_SAVED_TABS_FILE);
+
+	if ((f = fopen(file, "w")) == NULL) {
+		warn("save_tabs");
+		return (1);
+	}
+
+	TAILQ_FOREACH(ti, &tabs, entry) {
+		frame = webkit_web_view_get_main_frame(ti->wv);
+		uri = webkit_web_frame_get_uri(frame);
+		if (uri)
+			fprintf(f, "%s\n", uri);
+	}
+
+	fclose(f);
+
+	return (0);
+}
+
+int
+save_tabs_and_quit(struct tab *t, struct karg *args)
+{
+	save_tabs(t, NULL);
+	quit(t, NULL);
+
+	return (1);
+}
+
+int
 toggle_js(struct tab *t, struct karg *args)
 {
 	int			es, i;
@@ -1016,9 +1129,6 @@ toggle_js(struct tab *t, struct karg *args)
 	g_object_get((GObject *)t->settings,
 	    "enable-scripts", &es, (char *)NULL);
 	es = !es;
-	g_object_set((GObject *)t->settings,
-	    "enable-scripts", es, (char *)NULL);
-	webkit_web_view_set_settings(t->wv, t->settings);
 
 	frame = webkit_web_view_get_main_frame(t->wv);
 	s = (gchar *)webkit_web_frame_get_uri(frame);
@@ -1039,16 +1149,48 @@ toggle_js(struct tab *t, struct karg *args)
 		/* chop string at first slash */
 		if (s[i] == '/' || s[i] == '\0') {
 			s[i] = '\0';
-			if (es)
+			if (es) {
+				gtk_tool_button_set_stock_id(
+				    GTK_TOOL_BUTTON(t->js_toggle),
+				    GTK_STOCK_MEDIA_PLAY);
 				wl_add(s, &js_wl);
-			else {
+			} else {
 				d = wl_find(s, &js_wl);
 				if (d)
 					RB_REMOVE(domain_list, &js_wl, d);
+				gtk_tool_button_set_stock_id(
+				    GTK_TOOL_BUTTON(t->js_toggle),
+				    GTK_STOCK_MEDIA_PAUSE);
 			}
+			g_object_set((GObject *)t->settings,
+			    "enable-scripts", es, (char *)NULL);
+			webkit_web_view_set_settings(t->wv, t->settings);
+
 			webkit_web_view_reload(t->wv);
+
 			return (0);
 		}
+
+	return (0);
+}
+
+void
+js_toggle_cb(GtkWidget *w, struct tab *t)
+{
+	toggle_js(t, NULL);
+}
+
+int
+toggle_src(struct tab *t, struct karg *args)
+{
+	gboolean		mode;
+
+	if (t == NULL)
+		return (0);
+
+	mode = webkit_web_view_get_view_source_mode(t->wv);
+	webkit_web_view_set_view_source_mode(t->wv, !mode);
+	webkit_web_view_reload(t->wv);
 
 	return (0);
 }
@@ -1068,23 +1210,116 @@ focus(struct tab *t, struct karg *args)
 }
 
 int
-help(struct tab *t, struct karg *args)
+stats(struct tab *t, struct karg *args)
 {
-	if (t == NULL)
-		errx(1, "help");
+	char			*stats;
 
-	webkit_web_view_load_string(t->wv,
-	    "<html><body><h1>XXXTerm</h1></body></html>",
-	    NULL,
-	    NULL,
-	    NULL);
+	if (t == NULL)
+		errx(1, "stats");
+
+	stats = g_strdup_printf(XT_DOCTYPE
+	    "<html>"
+	    "<head>"
+	    "<title>Statistics</title>"
+	    "</head>"
+	    "<h1>Statistics</h1>"
+	    "<body>"
+	    "Cookies blocked(*) this session: %llu\n"
+	    "<p><small><b>*</b> results vary based on settings"
+	    "</body>"
+	    "</html>",
+	   blocked_cookies
+	    );
+
+	webkit_web_view_load_string(t->wv, stats, NULL, NULL, "");
+	g_free(stats);
 
 	return (0);
 }
 
+int
+about(struct tab *t, struct karg *args)
+{
+	char			*about;
+
+	if (t == NULL)
+		errx(1, "about");
+
+	about = g_strdup_printf(XT_DOCTYPE
+	    "<html>"
+	    "<head>"
+	    "<title>About</title>"
+	    "</head>"
+	    "<h1>About</h1>"
+	    "<body>"
+	    "<b>Version: %s</b><p>"
+	    "Authors:"
+	    "<ul>"
+	    "<li>Marco Peereboom &lt;marco@peereboom.us&gt;</li>"
+	    "<li>Edd Barrett &lt;vext01@gmail.com&gt; </li>"
+	    "</ul>"
+	    "Copyrights and licenses can be found on the XXXterm "
+	    "<a href=\"http://opensource.conformal.com/wiki/XXXTerm\">website</a>"
+	    "</body>"
+	    "</html>",
+	    version
+	    );
+
+	webkit_web_view_load_string(t->wv, about, NULL, NULL, "");
+	g_free(about);
+
+	return (0);
+}
+
+int
+help(struct tab *t, struct karg *args)
+{
+	char			*help;
+
+	if (t == NULL)
+		errx(1, "help");
+
+	help = XT_DOCTYPE
+	    "<html>"
+	    "<head>"
+	    "<title>XXXterm</title>"
+	    "<meta http-equiv=\"REFRESH\" content=\"0;"
+	        "url=http://opensource.conformal.com/cgi-bin/man-cgi?xxxterm\">"
+	    "</head>"
+	    "<body>"
+	    "XXXterm man page<a href=\"http://opensource.conformal.com/"
+	        "cgi-bin/man-cgi?xxxterm\">http://opensource.conformal.com/"
+		"cgi-bin/man-cgi?xxxterm</a>"
+	    "</body>"
+	    "</html>"
+	    ;
+
+	webkit_web_view_load_string(t->wv, help, NULL, NULL, "");
+
+	return (0);
+}
+
+/*
+ * update all favorite tabs apart from one. Pass NULL if
+ * you want to update all.
+ */
+void
+update_favorite_tabs(struct tab *apart_from)
+{
+	struct tab			*t;
+	if (!updating_fl_tabs) {
+		updating_fl_tabs = 1; /* stop infinite recursion */
+		TAILQ_FOREACH(t, &tabs, entry)
+			if ((t->xtp_meaning == XT_XTP_TAB_MEANING_FL)
+			    && (t != apart_from))
+				xtp_page_fl(t, NULL);
+		updating_fl_tabs = 0;
+	}
+}
+
 /* show a list of favorites (bookmarks) */
 int
-favorites(struct tab *t, struct karg *args)
+xtp_page_fl(struct tab *t, struct karg *args)
 {
 	char			file[PATH_MAX];
 	FILE			*f;
@@ -1096,7 +1331,14 @@ favorites(struct tab *t, struct karg *args)
 	DNPRINTF(XT_D_FAVORITE, "%s:", __func__);
 
 	if (t == NULL)
-		errx(1, "favorites");
+		warn("%s: bad param", __func__);
+
+	/* mark tab as favorite list */
+	t->xtp_meaning = XT_XTP_TAB_MEANING_FL;
+
+	/* new session key */
+	if (!updating_fl_tabs)
+		generate_xtp_session_key(&fl_session_key);
 
 	/* open favorites */
 	snprintf(file, sizeof file, "%s/%s/%s",
@@ -1116,7 +1358,8 @@ favorites(struct tab *t, struct karg *args)
 
 	/* body */
 	body = g_strdup_printf("<div align='center'><table><tr>"
-	    "<th style='width: 4%%'>&#35;</th><th>Link</th></tr>\n");
+	    "<th style='width: 4%%'>&#35;</th><th>Link</th>"
+	    "<th style='width: 15%%'>Remove</th></tr>\n");
 
 	for (i = 1;;) {
 		if ((title = fparseln(f, &len, &lineno, NULL, 0)) == NULL)
@@ -1137,8 +1380,14 @@ favorites(struct tab *t, struct karg *args)
 			}
 
 		tmp = body;
-		body = g_strdup_printf("%s<tr><td>%d</td><td><a href='%s'>%s"
-		    "</a></td></tr>\n", body, i, uri, title);
+		body = g_strdup_printf("%s<tr>"
+		    "<td>%d</td>"
+		    "<td><a href='%s'>%s</a></td>"
+		    "<td style='text-align: center'>"
+		    "<a href='%s%d/%s/%d/%d'>X</a></td>"
+		    "</tr>\n",
+		    body, i, uri, title,
+		    XT_XTP_STR, XT_XTP_FL, fl_session_key, XT_XTP_FL_REMOVE, i);
 
 		g_free(tmp);
 
@@ -1162,6 +1411,8 @@ favorites(struct tab *t, struct karg *args)
 		webkit_web_view_load_string(t->wv, html, NULL, NULL, "");
 	}
 
+	update_favorite_tabs(t);
+
 	if (header)
 		g_free(header);
 	if (body)
@@ -1173,7 +1424,33 @@ favorites(struct tab *t, struct karg *args)
 }
 
 int
-favadd(struct tab *t, struct karg *args)
+remove_cookie(int index)
+{
+	int			i, rv = 1;
+	GSList			*cf;
+	SoupCookie		*c;
+
+	DNPRINTF(XT_D_COOKIE, "remove_cookie: %d\n", index);
+
+	cf = soup_cookie_jar_all_cookies(p_cookiejar);
+
+	for (i = 1; cf; cf = cf->next, i++) {
+		if (i != index)
+			continue;
+		c = cf->data;
+		print_cookie("remove cookie", c);
+		soup_cookie_jar_delete_cookie(p_cookiejar, c);
+		rv = 0;
+		break;
+	}
+
+	soup_cookies_free(cf);
+
+	return (rv);
+}
+
+int
+add_favorite(struct tab *t, struct karg *args)
 {
 	char			file[PATH_MAX];
 	FILE			*f;
@@ -1183,7 +1460,7 @@ favadd(struct tab *t, struct karg *args)
 	const gchar		*uri, *title;
 
 	if (t == NULL)
-		errx(1, "favadd");
+		warn("%s: bad param", __func__);
 
 	snprintf(file, sizeof file, "%s/%s/%s",
 	    pwd->pw_dir, XT_DIR, XT_FAVS_FILE);
@@ -1222,6 +1499,8 @@ done:
 	if (line)
 		free(line);
 	fclose(f);
+
+	update_favorite_tabs(NULL);
 
 	return (0);
 }
@@ -1512,7 +1791,7 @@ command(struct tab *t, struct karg *args)
  * appended. Old string is freed.
  */
 char *
-dlman_table_row(char *html, struct download *dl)
+xtp_page_dl_row(char *html, struct download *dl)
 {
 
 	WebKitDownloadStatus	stat;
@@ -1520,13 +1799,13 @@ dlman_table_row(char *html, struct download *dl)
 	gdouble			progress;
 	char			cur_sz[FMT_SCALED_STRSIZE];
 	char			tot_sz[FMT_SCALED_STRSIZE];
-	char			*xtp_prefix; 
+	char			*xtp_prefix;
 
 	DNPRINTF(XT_D_DOWNLOAD, "%s: dl->id %d\n", __func__, dl->id);
 
 	/* All actions wil take this form:
 	 * xxxt://class/seskey
-	 */ 
+	 */
 	xtp_prefix = g_strdup_printf("%s%d/%s/",
 	    XT_XTP_STR, XT_XTP_DL, dl_session_key);
 
@@ -1603,10 +1882,28 @@ update_download_tabs(struct tab *apart_from)
 	if (!updating_dl_tabs) {
 		updating_dl_tabs = 1; /* stop infinite recursion */
 		TAILQ_FOREACH(t, &tabs, entry)
-			if ((t->xtp_meaning == XT_XTP_TAB_MEANING_DOWNLOAD)
+			if ((t->xtp_meaning == XT_XTP_TAB_MEANING_DL)
 			    && (t != apart_from))
-				dlman(t, NULL);
+				xtp_page_dl(t, NULL);
 		updating_dl_tabs = 0;
+	}
+}
+
+/*
+ * update all cookie tabs apart from one. Pass NULL if
+ * you want to update all.
+ */
+void
+update_cookie_tabs(struct tab *apart_from)
+{
+	struct tab			*t;
+	if (!updating_cl_tabs) {
+		updating_cl_tabs = 1; /* stop infinite recursion */
+		TAILQ_FOREACH(t, &tabs, entry)
+			if ((t->xtp_meaning == XT_XTP_TAB_MEANING_CL)
+			    && (t != apart_from))
+				xtp_page_cl(t, NULL);
+		updating_cl_tabs = 0;
 	}
 }
 
@@ -1622,15 +1919,116 @@ update_history_tabs(struct tab *apart_from)
 	if (!updating_hl_tabs) {
 		updating_hl_tabs = 1; /* stop infinite recursion */
 		TAILQ_FOREACH(t, &tabs, entry)
-			if ((t->xtp_meaning == XT_XTP_TAB_MEANING_HISTORY)
+			if ((t->xtp_meaning == XT_XTP_TAB_MEANING_HL)
 			    && (t != apart_from))
-				show_hist(t, NULL);
+				xtp_page_hl(t, NULL);
 		updating_hl_tabs = 0;
 	}
 }
 
+/* cookie management XTP page */
 int
-show_hist(struct tab *t, struct karg *args)
+xtp_page_cl(struct tab *t, struct karg *args)
+{
+	char			*header, *body, *footer, *page, *tmp;
+	int			i = 1; /* all ids start 1 */
+	GSList			*cf;
+	SoupCookie		*c;
+
+	DNPRINTF(XT_D_CMD, "%s", __func__);
+
+	if (t == NULL)
+		errx(1, "%s: null tab", __func__);
+
+	/* mark this tab as cookie jar */
+	t->xtp_meaning = XT_XTP_TAB_MEANING_CL;
+
+	/* Generate a new session key */
+	if (!updating_cl_tabs)
+		generate_xtp_session_key(&cl_session_key);
+
+	/* header */
+	header = g_strdup_printf(XT_DOCTYPE XT_HTML_TAG
+	  "\n<head><title>Cookie Jar</title>\n" XT_PAGE_STYLE
+	  "</head><body><h1>Cookie Jar</h1>\n");
+
+	/* body */
+	body = g_strdup_printf("<div align='center'><table><tr>"
+	    "<th>Name</th>"
+	    "<th>Value</th>"
+	    "<th>Domain</th>"
+	    "<th>Path</th>"
+	    "<th>Expires</th>"
+	    "<th>Secure</th>"
+	    "<th>HTTP_only</th>"
+	    "<th>Remove</th></tr>\n");
+
+	cf = soup_cookie_jar_all_cookies(p_cookiejar);
+
+	for (; cf; cf = cf->next) {
+		c = cf->data;
+
+		tmp = body;
+		body = g_strdup_printf(
+		    "%s\n<tr>"
+		    "<td style='width: 10%%; word-break: break-all'>%s</td>"
+		    "<td style='width: 20%%; word-break: break-all'>%s</td>"
+		    "<td style='width: 10%%; word-break: break-all'>%s</td>"
+		    "<td style='width: 8%%; word-break: break-all'>%s</td>"
+		    "<td style='width: 12%%; word-break: break-all'>%s</td>"
+		    "<td style='width: 3%%; text-align: center'>%d</td>"
+		    "<td style='width: 3%%; text-align: center'>%d</td>"
+		    "<td style='width: 3%%; text-align: center'>"
+		    "<a href='%s%d/%s/%d/%d'>X</a></td></tr>\n",
+		    body,
+		    c->name,
+		    c->value,
+		    c->domain,
+		    c->path,
+		    c->expires ?
+		        soup_date_to_string(c->expires, SOUP_DATE_HTTP) : "",
+		    c->secure,
+		    c->http_only,
+
+		    XT_XTP_STR,
+		    XT_XTP_CL,
+		    cl_session_key,
+		    XT_XTP_CL_REMOVE,
+		    i
+		    );
+
+		g_free(tmp);
+		i++;
+	}
+	soup_cookies_free(cf);
+
+	/* small message if there are none */
+	if (i == 1) {
+		tmp = body;
+		body = g_strdup_printf("%s\n<tr><td style='text-align:center'"
+		    "colspan='8'>No Cookies</td></tr>\n", body);
+		g_free(tmp);
+	}
+
+	/* footer */
+	footer = g_strdup_printf("</table></div></body></html>");
+
+	page = g_strdup_printf("%s%s%s", header, body, footer);
+
+	g_free(header);
+	g_free(body);
+	g_free(footer);
+
+	webkit_web_view_load_string(t->wv, page, "text/html", "UTF-8", "");
+	update_cookie_tabs(t);
+
+	g_free(page);
+
+	return (0);
+}
+
+int
+xtp_page_hl(struct tab *t, struct karg *args)
 {
 	char			*header, *body, *footer, *page, *tmp;
 	struct history		*h;
@@ -1642,7 +2040,7 @@ show_hist(struct tab *t, struct karg *args)
 		errx(1, "%s: null tab", __func__);
 
 	/* mark this tab as history manager */
-	t->xtp_meaning = XT_XTP_TAB_MEANING_HISTORY;
+	t->xtp_meaning = XT_XTP_TAB_MEANING_HL;
 
 	/* Generate a new session key */
 	if (!updating_hl_tabs)
@@ -1670,10 +2068,10 @@ show_hist(struct tab *t, struct karg *args)
 		    "<a href='%s%d/%s/%d/%d'>X</a></td></tr>\n",
 		    body, h->uri, h->uri, h->title,
 		    XT_XTP_STR, XT_XTP_HL, hl_session_key,
-		    XT_XTP_HL_REMOVE, i ++);
+		    XT_XTP_HL_REMOVE, i);
 
 		g_free(tmp);
-		i ++;
+		i++;
 	}
 
 	/* small message if there are none */
@@ -1710,7 +2108,7 @@ show_hist(struct tab *t, struct karg *args)
  * Generate a web page detailing the status of any downloads
  */
 int
-dlman(struct tab *t, struct karg *args)
+xtp_page_dl(struct tab *t, struct karg *args)
 {
 	struct download		*dl;
 	char			*header, *body, *footer, *page, *tmp;
@@ -1723,11 +2121,11 @@ dlman(struct tab *t, struct karg *args)
 		errx(1, "%s: null tab", __func__);
 
 	/* mark as a download manager tab */
-	t->xtp_meaning = XT_XTP_TAB_MEANING_DOWNLOAD;
+	t->xtp_meaning = XT_XTP_TAB_MEANING_DL;
 
 	/*
-	 * Generate a new session key for next dlman instance.
-	 * This only happens for the top level call to dlman(),
+	 * Generate a new session key for next page instance.
+	 * This only happens for the top level call to xtp_page_dl()
 	 * in which case updating_dl_tabs is 0.
 	 */
 	if (!updating_dl_tabs)
@@ -1761,8 +2159,8 @@ dlman(struct tab *t, struct karg *args)
 	    XT_XTP_STR, XT_XTP_DL, dl_session_key, XT_XTP_DL_LIST);
 
 	RB_FOREACH_REVERSE(dl, download_list, &downloads) {
-		body = dlman_table_row(body, dl);
-		n_dl ++;
+		body = xtp_page_dl_row(body, dl);
+		n_dl++;
 	}
 
 	/* message if no downloads in list */
@@ -1784,8 +2182,6 @@ dlman(struct tab *t, struct karg *args)
 	 * update all download manager tabs as the xtp session
 	 * key has now changed. No need to update the current tab.
 	 * Already did that above.
-	 *
-	 *
 	 */
 	update_download_tabs(t);
 
@@ -1959,23 +2355,36 @@ print_page(struct tab *t, struct karg *args)
 	return (0);
 }
 
+int
+go_home(struct tab *t, struct karg *args)
+{
+	char			*newuri;
+
+	newuri = guess_url_type((char *)home);
+	webkit_web_view_load_uri(t->wv, newuri);
+	free(newuri);
+
+	return (0);
+}
+
 /* inherent to GTK not all keys will be caught at all times */
 /* XXX sort key bindings */
 struct key {
 	guint		mask;
-	guint		modkey;
+	guint		use_in_entry;
 	guint		key;
 	int		(*func)(struct tab *, struct karg *);
 	struct karg	arg;
 } keys[] = {
-	{ GDK_MOD1_MASK,	0,	GDK_d,		dlman,		{0} },
-	{ GDK_CONTROL_MASK,	0,	GDK_h,		show_hist,	{0} },
+	{ GDK_MOD1_MASK,	0,	GDK_d,		xtp_page_dl,	{0} },
+	{ GDK_MOD1_MASK,	0,	GDK_h,		xtp_page_hl,	{0} },
 	{ GDK_CONTROL_MASK,	0,	GDK_p,		print_page,	{0}},
 	{ 0,			0,	GDK_slash,	command,	{.i = '/'} },
 	{ GDK_SHIFT_MASK,	0,	GDK_question,	command,	{.i = '?'} },
 	{ GDK_SHIFT_MASK,	0,	GDK_colon,	command,	{.i = ':'} },
 	{ GDK_CONTROL_MASK,	0,	GDK_q,		quit,		{0} },
 	{ GDK_CONTROL_MASK,	0,	GDK_j,		toggle_js,	{0} },
+	{ GDK_CONTROL_MASK,	0,	GDK_s,		toggle_src,	{0} },
 
 	/* search */
 	{ 0,			0,	GDK_n,		search,		{.i = XT_SEARCH_NEXT} },
@@ -1996,7 +2405,7 @@ struct key {
 	{ 0,			0,	GDK_F5,		navaction,	{.i = XT_NAV_RELOAD} },
 	{ GDK_CONTROL_MASK,	0,	GDK_r,		navaction,	{.i = XT_NAV_RELOAD} },
 	{ GDK_CONTROL_MASK,	0,	GDK_l,		navaction,	{.i = XT_NAV_RELOAD} },
-	{ GDK_CONTROL_MASK,	0,	GDK_f,		favorites,	{0} }, /* XXX make it work in edit boxes */
+	{ GDK_MOD1_MASK,	1,	GDK_f,		xtp_page_fl,	{0} },
 
 	/* vertical movement */
 	{ 0,			0,	GDK_j,		move,		{.i = XT_MOVE_DOWN} },
@@ -2006,7 +2415,7 @@ struct key {
 	{ GDK_SHIFT_MASK,	0,	GDK_G,		move,		{.i = XT_MOVE_BOTTOM} },
 	{ 0,			0,	GDK_End,	move,		{.i = XT_MOVE_BOTTOM} },
 	{ 0,			0,	GDK_Home,	move,		{.i = XT_MOVE_TOP} },
-	{ 0,			GDK_g,	GDK_g,		move,		{.i = XT_MOVE_TOP} }, /* XXX make this work */
+	{ 0,			0,	GDK_g,		move,		{.i = XT_MOVE_TOP} }, /* XXX make this work */
 	{ 0,			0,	GDK_space,	move,		{.i = XT_MOVE_PAGEDOWN} },
 	{ GDK_CONTROL_MASK,	0,	GDK_f,		move,		{.i = XT_MOVE_PAGEDOWN} },
 	{ GDK_CONTROL_MASK,	0,	GDK_d,		move,		{.i = XT_MOVE_HALFDOWN} },
@@ -2024,7 +2433,7 @@ struct key {
 
 	/* tabs */
 	{ GDK_CONTROL_MASK,	0,	GDK_t,		tabaction,	{.i = XT_TAB_NEW} },
-	{ GDK_CONTROL_MASK,	0,	GDK_w,		tabaction,	{.i = XT_TAB_DELETE} },
+	{ GDK_CONTROL_MASK,	1,	GDK_w,		tabaction,	{.i = XT_TAB_DELETE} },
 	{ GDK_CONTROL_MASK,	0,	GDK_1,		movetab,	{.i = 1} },
 	{ GDK_CONTROL_MASK,	0,	GDK_2,		movetab,	{.i = 2} },
 	{ GDK_CONTROL_MASK,	0,	GDK_3,		movetab,	{.i = 3} },
@@ -2051,15 +2460,21 @@ struct cmd {
 	{ "q!",			0,	quit,			{0} },
 	{ "qa",			0,	quit,			{0} },
 	{ "qa!",		0,	quit,			{0} },
+	{ "w",			0,	save_tabs,		{0} },
+	{ "wq",			0,	save_tabs_and_quit,	{0} },
+	{ "wq!",		0,	save_tabs_and_quit,	{0} },
 	{ "help",		0,	help,			{0} },
-
-	/* favorites */
-	{ "fav",		0,	favorites,		{0} },
-	{ "favadd",		0,	favadd,			{0} },
-	{ "dl"		,	0,	dlman,			{0} },
-	{ "h"		,	0,	show_hist,		{0} },
-	{ "hist"	,	0,	show_hist,		{0} },
-	{ "history"	,	0,	show_hist,		{0} },
+	{ "about",		0,	about,			{0} },
+	{ "stats",		0,	stats,			{0} },
+	{ "version",		0,	about,			{0} },
+	{ "cookies",		0,	xtp_page_cl,		{0} },
+	{ "fav",		0,	xtp_page_fl,		{0} },
+	{ "favadd",		0,	add_favorite,		{0} },
+	{ "dl"		,	0,	xtp_page_dl,		{0} },
+	{ "h"		,	0,	xtp_page_hl,		{0} },
+	{ "hist"	,	0,	xtp_page_hl,		{0} },
+	{ "history"	,	0,	xtp_page_hl,		{0} },
+	{ "home"	,	0,	go_home,		{0} },
 
 	{ "1",			0,	move,			{.i = XT_MOVE_TOP} },
 	{ "print",		0,	print_page,		{0} },
@@ -2101,25 +2516,11 @@ tab_close_cb(GtkWidget *event_box, GdkEventButton *event, struct tab *t)
 	return (FALSE);
 }
 
-void
-focus_uri_entry_cb(GtkWidget* w, GtkDirectionType direction, struct tab *t)
-{
-	DNPRINTF(XT_D_URL, "focus_uri_entry_cb: tab %d focus_wv %d\n",
-	    t->tab_id, t->focus_wv);
-
-	if (t == NULL)
-		errx(1, "focus_uri_entry_cb");
-
-	/* focus on wv instead */
-	if (t->focus_wv)
-		gtk_widget_grab_focus(GTK_WIDGET(t->wv));
-}
-
 /*
  * cancel, remove, etc. downloads
  */
 void
-dlman_ctrl(struct tab *t, uint8_t cmd, int id)
+xtp_handle_dl(struct tab *t, uint8_t cmd, int id)
 {
 	struct download		find, *d;
 
@@ -2148,13 +2549,13 @@ dlman_ctrl(struct tab *t, uint8_t cmd, int id)
 		RB_REMOVE(download_list, &downloads, d);
 		break;
 	case XT_XTP_DL_LIST:
-		/* Nothing, just dlman() below */
+		/* Nothing */
 		break;
 	default:
 		warn("%s: unknown command", __func__);
 		break;
 	};
-	dlman(t, NULL);
+	xtp_page_dl(t, NULL);
 }
 
 /*
@@ -2162,7 +2563,7 @@ dlman_ctrl(struct tab *t, uint8_t cmd, int id)
  * we provide the function for future actions
  */
 void
-hl_ctrl(struct tab *t, uint8_t cmd, int id)
+xtp_handle_hl(struct tab *t, uint8_t cmd, int id)
 {
 	struct history		*h, *next;
 	int			i = 1;
@@ -2179,20 +2580,143 @@ hl_ctrl(struct tab *t, uint8_t cmd, int id)
 				g_free(h);
 				break;
 			}
-			i ++;
+			i++;
 		}
 		break;
 	case XT_XTP_HL_LIST:
-		/* Nothing - just show_hist() below */
+		/* Nothing - just xtp_page_hl() below */
 		break;
 	default:
 		warn("%s: unknown command", __func__);
 		break;
 	};
 
-	show_hist(t, NULL);
+	xtp_page_hl(t, NULL);
 }
 
+/* remove a favorite */
+void
+remove_favorite(int index)
+{
+	char			file[PATH_MAX], *title, *uri;
+	char			*new_favs, *tmp;
+	FILE			*f;
+	int			i;
+	size_t			len, lineno;
+
+	/* open favorites */
+	snprintf(file, sizeof file, "%s/%s/%s",
+	    pwd->pw_dir, XT_DIR, XT_FAVS_FILE);
+
+	if ((f = fopen(file, "r")) == NULL) {
+		warn("%s: can't open favorites", __func__);
+		return;
+	}
+
+	/* build a string which will become the new favroites file */
+	new_favs = g_strdup_printf("%s", "");
+
+	for (i = 1;;) {
+		if ((title = fparseln(f, &len, &lineno, NULL, 0)) == NULL)
+			if (feof(f) || ferror(f))
+				break;
+		if (len == 0) {
+			free(title);
+			title = NULL;
+			continue;
+		}
+
+		if ((uri = fparseln(f, &len, &lineno, NULL, 0)) == NULL) {
+			if (feof(f) || ferror(f)) {
+				warn("%s: can't parse favorites", __func__);
+				goto clean;
+			}
+		}
+
+		/* as long as this isn't the one we are deleting add to file */
+		if (i != index) {
+			tmp = new_favs;
+			new_favs = g_strdup_printf("%s%s\n%s\n",
+			    new_favs, title, uri);
+			g_free(tmp);
+		}
+
+		free(uri);
+		uri = NULL;
+		free(title);
+		title = NULL;
+		i++;
+	}
+	fclose(f);
+
+	/* write back new favorites file */
+	if ((f = fopen(file, "w")) == NULL) {
+		warn("%s: can't open favorites", __func__);
+		goto clean;
+	}
+
+	fwrite(new_favs, strlen(new_favs), 1, f);
+	fclose(f);
+
+clean:
+	if (uri)
+		free(uri);
+	if (title)
+		free(title);
+
+	g_free(new_favs);
+}
+
+void
+xtp_handle_fl(struct tab *t, uint8_t cmd, int arg)
+{
+	switch (cmd) {
+	case XT_XTP_FL_LIST:
+		/* nothing, just the below call to xtp_page_fl() */
+		break;
+	case XT_XTP_FL_REMOVE:
+		remove_favorite(arg);
+		break;
+	default:
+		warn("%s: invalid favorites command", __func__);
+		break;
+	};
+
+	xtp_page_fl(t, NULL);
+}
+
+void
+xtp_handle_cl(struct tab *t, uint8_t cmd, int arg)
+{
+	switch (cmd) {
+	case XT_XTP_CL_LIST:
+		/* nothing, just xtp_page_cl() */
+		break;
+	case XT_XTP_CL_REMOVE:
+		remove_cookie(arg);
+		break;
+	default:
+		warn("%s: unknown cookie xtp command", __func__);
+		break;
+	};
+
+	xtp_page_cl(t, NULL);
+}
+
+/* link an XTP class to it's session key and handler function */
+struct xtp_despatch {
+	uint8_t			xtp_class;
+	char			**session_key;
+	void			(*handle_func)(struct tab *, uint8_t, int);
+};
+
+struct xtp_despatch		xtp_despatches[] = {
+	{ XT_XTP_DL, &dl_session_key, xtp_handle_dl },
+	{ XT_XTP_HL, &hl_session_key, xtp_handle_hl },
+	{ XT_XTP_FL, &fl_session_key, xtp_handle_fl },
+	{ XT_XTP_CL, &cl_session_key, xtp_handle_cl },
+	{ NULL, NULL, NULL }
+};
 
 /*
  * is the url xtp protocol? (xxxt://)
@@ -2201,11 +2725,14 @@ hl_ctrl(struct tab *t, uint8_t cmd, int id)
 int
 parse_xtp_url(struct tab *t, const char *url)
 {
-	char		*dup = NULL, *p, *last;
-	uint8_t		n_tokens = 0;
-	char		*tokens[4] = {NULL, NULL, NULL, ""};
+	char			*dup = NULL, *p, *last;
+	uint8_t			n_tokens = 0;
+	char			*tokens[4] = {NULL, NULL, NULL, ""};
+	struct xtp_despatch	*dsp, *dsp_match = NULL;
+	uint8_t			req_class;
 
-	/* tokens array meaning:
+	/*
+	 * tokens array meaning:
 	 *   tokens[0] = class
 	 *   tokens[1] = session key
 	 *   tokens[2] = action
@@ -2231,39 +2758,30 @@ parse_xtp_url(struct tab *t, const char *url)
 
 	/* should be atleast three fields 'class/seskey/command/arg' */
 	if (n_tokens < 3)
-		return 0;
+		goto clean;
 
-	switch (atoi(tokens[0])) {
-	/* if a download XTP url */
-	case XT_XTP_DL:
-
-		/* validate session key */
-		if (!validate_xtp_session_key(dl_session_key, tokens[1])) {
-			warn("%s: invalid download session key", __func__);
-			return (1);
+	dsp = xtp_despatches;
+	req_class = atoi(tokens[0]);
+	while (dsp->xtp_class != NULL) {
+		if (dsp->xtp_class == req_class) {
+			dsp_match = dsp;
+			break;
 		}
-
-		dlman_ctrl(t, atoi(tokens[2]), atoi(tokens[3]));
-
-	/* if a history XTP url */
-		break;
-	case XT_XTP_HL:
-
-		/* validate session key */
-		if (!validate_xtp_session_key(hl_session_key, tokens[1])) {
-			warn("%s: invalid history session key", __func__);
-			return (1);
-		}
-
-		hl_ctrl(t, atoi(tokens[2]), atoi(tokens[3]));
-
-		break;
-
-	default:/* unsupported class */
-		warn("%s: unsupported class: %s", __func__, tokens[0]);
-		break;
+		dsp++;
 	}
 
+	/* did we find one atall? */
+	if (dsp_match == NULL) {
+		warn("%s: no matching xtp despatch found", __func__);
+		goto clean;
+	}
+
+	/* check session key and call despatch function */
+	if (validate_xtp_session_key(*(dsp_match->session_key), tokens[1])) {
+		dsp_match->handle_func(t, atoi(tokens[2]), atoi(tokens[3]));
+	}
+
+clean:
 	if (dup)
 		g_free(dup);
 
@@ -2348,12 +2866,62 @@ check_and_set_js(gchar *uri, struct tab *t)
 	g_object_set((GObject *)t->settings,
 	    "enable-scripts", es, (char *)NULL);
 	webkit_web_view_set_settings(t->wv, t->settings);
+
+	gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(t->js_toggle),
+	    es ? GTK_STOCK_MEDIA_PLAY : GTK_STOCK_MEDIA_PAUSE);
+}
+
+void
+show_ca_status(struct tab *t, const char *uri)
+{
+	WebKitWebFrame		*frame;
+	WebKitWebDataSource	*source;
+	WebKitNetworkRequest	*request;
+	SoupMessage		*message;
+	GdkColor		color;
+	gchar			*col_str = "white";
+
+	DNPRINTF(XT_D_URL, "show_ca_status: %d %s %s\n",
+	    ssl_strict_certs, ssl_ca_file, uri);
+
+	if (uri == NULL)
+		goto done;
+	if (ssl_ca_file == NULL) {
+		if (g_str_has_prefix(uri, "http://"))
+			goto done;
+		if (g_str_has_prefix(uri, "https://")) {
+			col_str = "red";
+			goto done;
+		}
+		return;
+	}
+	if (g_str_has_prefix(uri, "http://") ||
+	    !g_str_has_prefix(uri, "https://"))
+		goto done;
+
+	frame = webkit_web_view_get_main_frame(t->wv);
+	source = webkit_web_frame_get_data_source(frame);
+	request = webkit_web_data_source_get_request(source);
+	message = webkit_network_request_get_message(request);
+
+	if (message && (soup_message_get_flags(message) &
+	    SOUP_MESSAGE_CERTIFICATE_TRUSTED)) {
+		col_str = "green";
+		goto done;
+	} else {
+		col_str = "yellow";
+		goto done;
+	}
+done:
+	if (col_str) {
+		gdk_color_parse(col_str, &color);
+		gtk_widget_modify_base(t->uri_entry, GTK_STATE_NORMAL, &color);
+	}
 }
 
 void
 notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 {
-	GdkColor		color;
 	WebKitWebFrame		*frame;
 	const gchar		*set = NULL, *uri = NULL, *title = NULL;
 	struct history		*h, find;
@@ -2375,12 +2943,6 @@ notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 
 		gtk_widget_set_sensitive(GTK_WIDGET(t->stop), TRUE);
 		t->focus_wv = 1;
-		/* check if js white listing is enabled */
-		if (enable_js_whitelist) {
-			frame = webkit_web_view_get_main_frame(wview);
-			uri = webkit_web_frame_get_uri(frame);
-			check_and_set_js((gchar *)uri, t);
-		}
 
 		/* take focus if we are visible */
 		if (gtk_notebook_get_current_page(notebook) == t->tab_id)
@@ -2394,13 +2956,14 @@ notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 		if (uri)
 			gtk_entry_set_text(GTK_ENTRY(t->uri_entry), uri);
 
-		/* color uri_entry */
-		if (uri && !strncmp(uri, "https://", strlen("https://")))
-			gdk_color_parse("green", &color);
-		else
-			gdk_color_parse("white", &color);
-		gtk_widget_modify_base(t->uri_entry, GTK_STATE_NORMAL, &color);
+		/* check if js white listing is enabled */
+		if (enable_js_whitelist) {
+			frame = webkit_web_view_get_main_frame(wview);
+			uri = webkit_web_frame_get_uri(frame);
+			check_and_set_js((gchar *)uri, t);
+		}
 
+		show_ca_status(t, uri);
 		break;
 
 	case WEBKIT_LOAD_FIRST_VISUALLY_NON_EMPTY_LAYOUT:
@@ -2640,7 +3203,7 @@ webview_download_cb(WebKitWebView *wv, WebKitDownload *wk_download, struct tab *
 		download_entry = g_malloc(sizeof(struct download));
 		download_entry->download = wk_download;
 		download_entry->tab = t;
-		download_entry->id = next_download_id ++;
+		download_entry->id = next_download_id++;
 		RB_INSERT(download_list, &downloads, download_entry);
 		/* get from history */
 		g_object_ref(wk_download);
@@ -2834,8 +3397,10 @@ cmd_keyrelease_cb(GtkEntry *w, GdkEventKey *e, struct tab *t)
 
 	if (c[0] == ':')
 		goto done;
-	if (strlen(c) == 1)
+	if (strlen(c) == 1) {
+		webkit_web_view_unmark_text_matches(t->wv);
 		goto done;
+	}
 
 	if (c[0] == '/')
 		forward = TRUE;
@@ -2890,6 +3455,28 @@ cmd_complete(struct tab *t, char *s)
 #endif
 
 int
+entry_key_cb(GtkEntry *w, GdkEventKey *e, struct tab *t)
+{
+	int			i;
+
+	if (t == NULL)
+		errx(1, "entry_key_cb");
+
+	DNPRINTF(XT_D_CMD, "entry_key_cb: keyval 0x%x mask 0x%x t %p\n",
+	    e->keyval, e->state, t);
+
+	for (i = 0; i < LENGTH(keys); i++)
+		if (e->keyval == keys[i].key &&
+		    CLEAN(e->state) == keys[i].mask &&
+		    keys[i].use_in_entry) {
+			keys[i].func(t, &keys[i].arg);
+			return (XT_CB_HANDLED);
+		}
+
+	return (XT_CB_PASSTHROUGH);
+}
+
+int
 cmd_keypress_cb(GtkEntry *w, GdkEventKey *e, struct tab *t)
 {
 	int			rv = XT_CB_HANDLED;
@@ -2930,6 +3517,10 @@ cmd_keypress_cb(GtkEntry *w, GdkEventKey *e, struct tab *t)
 	case GDK_Escape:
 		gtk_widget_hide(t->cmd);
 		gtk_widget_grab_focus(GTK_WIDGET(t->wv));
+
+		/* cancel search */
+		if (c[0] == '/' || c[0] == '?')
+			webkit_web_view_unmark_text_matches(t->wv);
 		goto done;
 	}
 
@@ -3127,17 +3718,10 @@ create_window(void)
 GtkWidget *
 create_toolbar(struct tab *t)
 {
-	GtkWidget		*toolbar = gtk_toolbar_new();
-	GtkToolItem		*i;
+	GtkWidget		*toolbar = NULL, *b;
 
-#if GTK_CHECK_VERSION(2,15,0)
-	gtk_orientable_set_orientation(GTK_ORIENTABLE(toolbar),
-	    GTK_ORIENTATION_HORIZONTAL);
-#else
-	gtk_toolbar_set_orientation(GTK_TOOLBAR(toolbar),
-	    GTK_ORIENTATION_HORIZONTAL);
-#endif
-	gtk_toolbar_set_style(GTK_TOOLBAR(toolbar), GTK_TOOLBAR_BOTH_HORIZ);
+	b = gtk_hbox_new(FALSE, 0);
+	toolbar = b;
 
 	if (fancy_bar) {
 		/* backward button */
@@ -3145,7 +3729,8 @@ create_toolbar(struct tab *t)
 		gtk_widget_set_sensitive(GTK_WIDGET(t->backward), FALSE);
 		g_signal_connect(G_OBJECT(t->backward), "clicked",
 		    G_CALLBACK(backward_cb), t);
-		gtk_toolbar_insert(GTK_TOOLBAR(toolbar), t->backward, -1);
+		gtk_box_pack_start(GTK_BOX(b), GTK_WIDGET(t->backward), FALSE,
+		    FALSE, 0);
 
 		/* forward button */
 		t->forward =
@@ -3153,34 +3738,44 @@ create_toolbar(struct tab *t)
 		gtk_widget_set_sensitive(GTK_WIDGET(t->forward), FALSE);
 		g_signal_connect(G_OBJECT(t->forward), "clicked",
 		    G_CALLBACK(forward_cb), t);
-		gtk_toolbar_insert(GTK_TOOLBAR(toolbar), t->forward, -1);
+		gtk_box_pack_start(GTK_BOX(b), GTK_WIDGET(t->forward), FALSE,
+		    FALSE, 0);
 
 		/* stop button */
 		t->stop = gtk_tool_button_new_from_stock(GTK_STOCK_STOP);
 		gtk_widget_set_sensitive(GTK_WIDGET(t->stop), FALSE);
 		g_signal_connect(G_OBJECT(t->stop), "clicked",
 		    G_CALLBACK(stop_cb), t);
-		gtk_toolbar_insert(GTK_TOOLBAR(toolbar), t->stop, -1);
+		gtk_box_pack_start(GTK_BOX(b), GTK_WIDGET(t->stop), FALSE,
+		    FALSE, 0);
+
+		/* JS button */
+		t->js_toggle =
+		    gtk_tool_button_new_from_stock(enable_scripts ?
+		        GTK_STOCK_MEDIA_PLAY : GTK_STOCK_MEDIA_PAUSE);
+		gtk_widget_set_sensitive(GTK_WIDGET(t->js_toggle), TRUE);
+		g_signal_connect(G_OBJECT(t->js_toggle), "clicked",
+		    G_CALLBACK(js_toggle_cb), t);
+		gtk_box_pack_start(GTK_BOX(b), GTK_WIDGET(t->js_toggle), FALSE,
+		    FALSE, 0);
 	}
 
-	/* uri entry */
-	i = gtk_tool_item_new();
-	gtk_tool_item_set_expand(i, TRUE);
 	t->uri_entry = gtk_entry_new();
-	gtk_container_add(GTK_CONTAINER(i), t->uri_entry);
 	g_signal_connect(G_OBJECT(t->uri_entry), "activate",
 	    G_CALLBACK(activate_uri_entry_cb), t);
-	gtk_toolbar_insert(GTK_TOOLBAR(toolbar), i, -1);
+	g_signal_connect(G_OBJECT(t->uri_entry), "key-press-event",
+	    (GCallback)entry_key_cb, t);
+	gtk_box_pack_start(GTK_BOX(b), t->uri_entry, TRUE, TRUE, 0);
 
 	/* search entry */
 	if (fancy_bar && search_string) {
-		i = gtk_tool_item_new();
 		t->search_entry = gtk_entry_new();
 		gtk_entry_set_width_chars(GTK_ENTRY(t->search_entry), 30);
-		gtk_container_add(GTK_CONTAINER(i), t->search_entry);
 		g_signal_connect(G_OBJECT(t->search_entry), "activate",
 		    G_CALLBACK(activate_search_entry_cb), t);
-		gtk_toolbar_insert(GTK_TOOLBAR(toolbar), i, -1);
+		g_signal_connect(G_OBJECT(t->uri_entry), "key-press-event",
+		    (GCallback)entry_key_cb, t);
+		gtk_box_pack_start(GTK_BOX(b), t->search_entry, FALSE, FALSE, 0);
 	}
 
 	return (toolbar);
@@ -3328,9 +3923,6 @@ create_new_tab(char *title, int focus)
 	    "signal-after::key-press-event", (GCallback)webview_keypress_cb, t,
 	    (char *)NULL);
 
-	g_signal_connect(G_OBJECT(t->uri_entry), "focus",
-	    G_CALLBACK(focus_uri_entry_cb), t);
-
 	g_signal_connect(G_OBJECT(event_box), "button_press_event", G_CALLBACK(tab_close_cb), t);
 
 	/* hide stuff */
@@ -3401,25 +3993,6 @@ create_canvas(void)
 }
 
 void
-print_cookie(char *msg, SoupCookie *c)
-{
-	if (c == NULL)
-		return;
-
-	if (msg)
-		DNPRINTF(XT_D_COOKIE, "%s\n", msg);
-	DNPRINTF(XT_D_COOKIE, "name     : %s\n", c->name);
-	DNPRINTF(XT_D_COOKIE, "value    : %s\n", c->value);
-	DNPRINTF(XT_D_COOKIE, "domain   : %s\n", c->domain);
-	DNPRINTF(XT_D_COOKIE, "path     : %s\n", c->path);
-	DNPRINTF(XT_D_COOKIE, "expires  : %s\n",
-	    c->expires ? soup_date_to_string(c->expires, SOUP_DATE_HTTP) : "");
-	DNPRINTF(XT_D_COOKIE, "secure   : %d\n", c->secure);
-	DNPRINTF(XT_D_COOKIE, "http_only: %d\n", c->http_only);
-	DNPRINTF(XT_D_COOKIE, "====================================\n");
-}
-
-void
 cookiejar_changed_cb(SoupCookieJar *jar, SoupCookie *old_cookie,
     SoupCookie *new_cookie, gpointer user_data)
 {
@@ -3430,6 +4003,7 @@ cookiejar_changed_cb(SoupCookieJar *jar, SoupCookie *old_cookie,
 
 	if (new_cookie) {
 		if ((d = wl_find(new_cookie->domain, &c_wl)) == NULL) {
+			blocked_cookies++;
 			DNPRINTF(XT_D_COOKIE,
 			    "cookiejar_changed_cb: reject %s\n",
 			    new_cookie->domain);
@@ -3473,6 +4047,9 @@ setup_cookies(char *file)
 	 * I'll take a diff if someone knows how to do this within the gtk
 	 * framework.
 	 */
+
+	if (cookies_enabled == 0)
+		return;
 
 	p_cookiejar = soup_cookie_jar_text_new(file, read_only_cookies);
 	if (enable_cookie_whitelist) {
@@ -3559,6 +4136,8 @@ main(int argc, char *argv[])
 	/* generate session keys for xtp pages */
 	generate_xtp_session_key(&dl_session_key);
 	generate_xtp_session_key(&hl_session_key);
+	generate_xtp_session_key(&cl_session_key);
+	generate_xtp_session_key(&fl_session_key);
 
 	/* prepare gtk */
 	gtk_init(&argc, &argv);
@@ -3622,6 +4201,18 @@ main(int argc, char *argv[])
 	snprintf(file, sizeof file, "%s/cookies.txt", work_dir);
 	setup_cookies(file);
 
+	if (ssl_ca_file) {
+		if (stat(ssl_ca_file, &sb)) {
+			warn("no CA file: %s", ssl_ca_file);
+			g_free(ssl_ca_file);
+			ssl_ca_file = NULL;
+		} else
+			g_object_set(session,
+			    SOUP_SESSION_SSL_CA_FILE, ssl_ca_file,
+			    SOUP_SESSION_SSL_STRICT, ssl_strict_certs,
+			    (void *)NULL);
+	}
+
 	/* proxy */
 	env_proxy = getenv("http_proxy");
 	if (env_proxy)
@@ -3630,6 +4221,8 @@ main(int argc, char *argv[])
 		setup_proxy(http_proxy);
 
 	create_canvas();
+
+	focus = restore_saved_tabs();
 
 	while (argc) {
 		create_new_tab(argv[0], focus);

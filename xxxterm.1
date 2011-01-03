@@ -1,4 +1,4 @@
-.\"	$xxxterm: xxxterm.1,v 1.31 2010/12/26 23:42:50 marco Exp $
+.\"	$xxxterm: xxxterm.1,v 1.47 2011/01/03 00:16:33 marco Exp $
 .\"
 .\" Copyright (c) 2010 Marco Peereboom <marco@peereboom.us>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: December 26 2010 $
+.Dd $Mdocdate: January 3 2011 $
 .Dt XXXTERM 1
 .Os
 .Sh NAME
@@ -25,7 +25,8 @@
 .Bk -words
 .Op Fl STtV
 .Op Fl f Ar file
-.Op Ar uri ...
+.Op Fl n
+.Op Ar url ...
 .Ek
 .Sh DESCRIPTION
 .Nm
@@ -74,6 +75,11 @@ Disable the toolbar.
 Disable visualization of tabs.
 .It Fl t
 Disable tabs.
+.It Fl n
+Open a new tab in a running
+.Nm
+for each specified url.
+This option requires enable_socket to be enabled.
 .It Fl V
 Display version and exit.
 .El
@@ -99,8 +105,16 @@ Give focus in newly created tab instead of opening it in the background.
 .It Cm read_only_cookies
 Mark cookies file read-only and discard all cookies once the sessions is
 terminated.
+.It Cm append_next
+When set a new tab is appended after the current tab instead of being appended
+as the last tab.
 .It Cm cookies_enabled
 Enable cookies.
+.It Cm allow_volatile_cookies
+If set cookies are stored in the session cache but will be discarded once
+.Nm
+exits.
+Unfortunately enabling this does allow for some limited tracking on the web.
 .It Cm enable_scripts
 Enable scripts.
 .It Cm enable_plugins
@@ -182,6 +196,32 @@ If ssl_ca_file is not set then the URL bar will color all https connections red.
 .It Cm ssl_strict_certs
 If this value is set connections to untrusted sites will be aborted.
 This value is only used if ssl_ca_file is set.
+.It Cm enable_socket
+When enabled the first instance of
+.Nm
+will create a socket in the ~/.xxxterm directory.
+Using the -n url option on subsequent
+.Nm
+invocations will cause the specified url to be loaded in a new tab.
+Only a user with identical UID and GID can use this option.
+.It Cm resource_dir
+Directory that contains various xxxterm resources such as icons.
+This is OS specific and should be handled by the porter.
+.It Cm single_instance
+If set only one
+.Nm
+will be permitted to run.
+If there is a url specified it will be opened in a new tab in the already
+running
+.Nm
+session.
+.It Cm runtime_settings
+This setting points to a filename in the .xxxterm work directory that contains
+runtime configuration entries.
+This file is parsed as a normal configuration file and will override settings
+since it is read at a later time.
+One should only use this file to add js_wl, cookie_wl and mime_type entries.
+This file is machine generated and should not be edited by hand.
 .El
 .Pp
 .Nm
@@ -219,6 +259,19 @@ Focus:
 Focus on URI entry
 .It Cm F7
 Focus on search entry
+.El
+.Pp
+Command aliases (useful when -S flag is used):
+.Pp
+.Bl -tag -width "tabnew, tabedit, tabe [URI]" -offset indent -compact
+.It Cm F9
+Alias for ":open" (See command descriptions below)
+.It Cm F10
+Alias for ":open <current-uri>"
+.It Cm F11
+Alias for ":tabnew"
+.It Cm F12
+Alias for ":tabnew <current-uri>"
 .El
 .Pp
 Navigation:
@@ -273,12 +326,29 @@ Tab Manipulation:
 Create new tab with focus in URI entry
 .It Cm C-W
 Destroy current tab
+.It Cm U
+Undo close tab
+.It Cm C-Left
+Go to the previous tab.
+.It Cm C-Right
+Go to the next tab.
 .It Cm C-[1..0]
 Jump to page N
 .It Cm C-minus
 Shrink font size by one point.
 .It Cm C-plus, C-equal
 Grow font size by one point.
+.El
+.Pp
+Yanking and pasting:
+.Pp
+.Bl -tag -width "tabnew, tabedit, tabe [URI]" -offset indent -compact
+.It Cm y
+Yank the current URI into the clipboard.
+.It Cm p
+Paste the contents of the clipboard into the address bar.
+.It Cm P
+Paste the contents of the clipboard into a new tab.
 .El
 .Pp
 Mouse-less browsing (a.k.a. link following):
@@ -315,6 +385,10 @@ Save open tabs.
 The tabs will be restored next time
 .Nm
 is started.
+.It Cm restart
+Restart
+.Nm
+and reload all current tabs.
 .It Cm wq, wq!
 Save open tabs and quit.
 The tabs will be restored next time
@@ -324,6 +398,18 @@ is started.
 Show favorites
 .It Cm favadd
 Add current page to favorites
+.It Cm jsadd
+Add current page domain as a JavaScript white list entry to the runtime
+configuration file.
+This action will also enable JavaScript if it is currently disabled for this
+domain.
+.It Cm cookieadd
+Add current page domain as a cookie white list entry to the runtime
+configuration file.
+This action will also allow cookies if it is currently disallowed for this
+domain.
+If there are volatile session cookies then those will be saved into the
+persistent cookie jar.
 .It Cm dl
 Show download manager
 .It Cm print

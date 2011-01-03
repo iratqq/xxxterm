@@ -4479,17 +4479,17 @@ setup_webkit(struct tab *t)
 	    "enable-plugins", enable_plugins, (char *)NULL);
 	adjustfont_webkit(t, XT_FONT_SET);
 	g_object_set((GObject *)t->settings,
-	    "default-font-family", default_font_family, NULL);
+	    "default-font-family", default_font_family, (char *)NULL);
 	g_object_set((GObject *)t->settings,
-	    "serif-font-family", serif_font_family, NULL);
+	    "serif-font-family", serif_font_family, (char *)NULL);
 	g_object_set((GObject *)t->settings,
-	    "sans-serif-font-family", sans_serif_font_family, NULL);
+	    "sans-serif-font-family", sans_serif_font_family, (char *)NULL);
 	g_object_set((GObject *)t->settings,
-	    "monospace-font-family", monospace_font_family, NULL);
+	    "monospace-font-family", monospace_font_family, (char *)NULL);
 	g_object_set((GObject *)t->settings,
-	    "default-encoding", default_encoding, NULL);
+	    "default-encoding", default_encoding, (char *)NULL);
 	g_object_set((GObject *)t->settings,
-	    "user-stylesheet-uri", user_stylesheet, NULL);
+	    "user-stylesheet-uri", user_stylesheet, (char *)NULL);
 
 	webkit_web_view_set_settings(t->wv, t->settings);
 }

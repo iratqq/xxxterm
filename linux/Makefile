@@ -1,4 +1,4 @@
-# $xxxterm: Makefile,v 1.4 2010/12/23 00:43:11 marco Exp $ 
+# $xxxterm: Makefile,v 1.5 2011/01/04 10:29:32 marco Exp $
 
 LIBS= gtk+-2.0 webkit-1.0 libsoup-2.4
 

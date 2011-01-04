@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.194 2011/01/04 03:09:32 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.195 2011/01/04 10:29:32 marco Exp $ */
 /*
  * Copyright (c) 2010 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2010 Edd Barrett <vext01@gmail.com>
@@ -85,7 +85,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.194 2011/01/04 03:09:32 marco Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.195 2011/01/04 10:29:32 marco Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -218,6 +218,7 @@ RB_HEAD(domain_list, domain);
 struct undo {
         TAILQ_ENTRY(undo)	entry;
         gchar			*uri;
+	GList			*history;
 };
 TAILQ_HEAD(undo_tailq, undo);
 
@@ -682,7 +683,7 @@ struct mime_type_list	mtl;
 struct alias_list	aliases;
 
 /* protos */
-void			create_new_tab(char *, int);
+void			create_new_tab(char *, GList *, int);
 void			delete_tab(struct tab *);
 void			adjustfont_webkit(struct tab *, int);
 int			run_script(struct tab *, char *);
@@ -1408,7 +1409,7 @@ restore_saved_tabs(void)
 	while (!feof(f)) {
 		line = fparseln(f, &linelen, NULL, NULL, 0);
 		if (line) {
-			create_new_tab(line, 1);
+			create_new_tab(line, NULL, 1);
 			empty_saved_tabs_file = 0;
 		}
 		free(line);
@@ -1507,7 +1508,7 @@ paste_uri_cb(GtkClipboard *clipboard, const gchar *text, gpointer data)
 		webkit_web_view_load_uri(pap->t->wv, text);
 		break;
 	case XT_PASTE_NEW_TAB:
-		create_new_tab((char *)text, 1);
+		create_new_tab((char *)text, NULL, 1);
 		break;
 	}
 
@@ -2294,9 +2295,9 @@ tabaction(struct tab *t, struct karg *args)
 	switch (args->i) {
 	case XT_TAB_NEW:
 		if ((url = getparams(args->s, "tabnew")))
-			create_new_tab(url, 1);
+			create_new_tab(url, NULL, 1);
 		else
-			create_new_tab(NULL, 1);
+			create_new_tab(NULL, NULL, 1);
 		break;
 	case XT_TAB_DELETE:
 		delete_tab(t);
@@ -2332,9 +2333,12 @@ tabaction(struct tab *t, struct karg *args)
 		} else {
 			undo_count--;
 			u = TAILQ_FIRST(&undos);
-			create_new_tab(u->uri, 1);
+			DPRINTF("%s: uri: %s", __func__, u->uri);
+			create_new_tab(u->uri, u->history, 1);
+
 			TAILQ_REMOVE(&undos, u, entry);
 			g_free(u->uri);
+			/* u->history is freed in create_new_tab() */
 			g_free(u);
 		}
 		break;
@@ -3901,7 +3905,7 @@ webview_npd_cb(WebKitWebView *wv, WebKitWebFrame *wf,
 
 	if ((!parse_xtp_url(t, uri) && (t->ctrl_click))) {
 		t->ctrl_click = 0;
-		create_new_tab(uri, ctrl_click_focus);
+		create_new_tab(uri, NULL, ctrl_click_focus);
 		webkit_web_policy_decision_ignore(pd);
 		return (TRUE); /* we made the decission */
 	}
@@ -4624,13 +4628,34 @@ recalc_tabs(void)
 }
 
 int
-undo_close_tab_push(const gchar *uri)
+undo_close_tab_save(struct tab *t)
 {
-	struct undo	*u1, *u2;
+	int				n;
+	const gchar			*uri;
+	struct undo			*u1, *u2;
+	WebKitWebFrame                  *frame;
+	WebKitWebBackForwardList        *bfl;
+	GList                           *list, *elem;
+	WebKitWebHistoryItem            *hi1, *hi2;
 
-	u1 = g_malloc(sizeof(struct undo));
-	u1->uri = g_malloc(strlen(uri) * sizeof(gchar));
-	snprintf(u1->uri, strlen(uri), "%s", uri);
+	frame = webkit_web_view_get_main_frame(t->wv);
+	uri = webkit_web_frame_get_uri(frame);
+
+	if (uri && !strlen(uri))
+		return (1);
+
+	u1 = g_malloc0(sizeof(struct undo));
+	u1->uri = g_strdup(uri);
+
+	bfl = webkit_web_view_get_back_forward_list(t->wv);
+	n = webkit_web_back_forward_list_get_back_length(bfl);
+	list = webkit_web_back_forward_list_get_back_list_with_limit(bfl, n);
+
+	for (elem = list; elem; elem = elem->next) {
+		hi1 = elem->data;
+		hi2 = webkit_web_history_item_copy(hi1);
+		u1->history = g_list_prepend(u1->history, hi2);
+	}
 
 	TAILQ_INSERT_HEAD(&undos, u1, entry);
 
@@ -4638,6 +4663,7 @@ undo_close_tab_push(const gchar *uri)
 		u2 = TAILQ_LAST(&undos, undo_tailq);
 		TAILQ_REMOVE(&undos, u2, entry);
 		g_free(u2->uri);
+		g_list_free(u2->history);
 		g_free(u2);
 	} else
 		undo_count++;
@@ -4648,9 +4674,6 @@ undo_close_tab_push(const gchar *uri)
 void
 delete_tab(struct tab *t)
 {
-	WebKitWebFrame		*frame;
-	const gchar		*uri;
-
 	DNPRINTF(XT_D_TAB, "delete_tab: %p\n", t);
 
 	if (t == NULL)
@@ -4659,11 +4682,7 @@ delete_tab(struct tab *t)
 	/* halt all webkit activity */
 	webkit_web_view_stop_loading(t->wv);
 
-	/* Save URI of tab; so we can undo close tab. */
-	frame = webkit_web_view_get_main_frame(t->wv);
-	uri = webkit_web_frame_get_uri(frame);
-	if (uri && strlen(uri))
-		undo_close_tab_push(uri);
+	undo_close_tab_save(t);
 
 	TAILQ_REMOVE(&tabs, t, entry);
 	recalc_tabs();
@@ -4673,7 +4692,7 @@ delete_tab(struct tab *t)
 	g_free(t);
 
 	if (TAILQ_EMPTY(&tabs))
-		create_new_tab(NULL, 1);
+		create_new_tab(NULL, NULL, 1);
 }
 
 void
@@ -4703,12 +4722,16 @@ append_tab(struct tab *t)
 }
 
 void
-create_new_tab(char *title, int focus)
+create_new_tab(char *title, GList *history, int focus)
 {
 	struct tab		*t, *tt;
 	int			load = 1, id, notfound;
 	char			*newuri = NULL;
 	GtkWidget		*image, *b, *bb;
+	WebKitWebHistoryItem	*hi;
+	GList			*elem;
+	WebKitWebBackForwardList *bfl;
+
 
 	DNPRINTF(XT_D_TAB, "create_new_tab: title %s focus %d\n", title, focus);
 
@@ -4852,6 +4875,17 @@ create_new_tab(char *title, int focus)
 		gtk_notebook_set_current_page(notebook, t->tab_id);
 		DNPRINTF(XT_D_TAB, "create_new_tab: going to tab: %d\n",
 		    t->tab_id);
+	}
+
+	/* restore the tab's history */
+	if (history) {
+		for (elem = history; elem; elem = elem->next) {
+			hi  = elem->data;
+			bfl = webkit_web_view_get_back_forward_list(t->wv);
+			webkit_web_back_forward_list_add_item(bfl, hi);
+		}
+		g_list_free(history);
+		g_list_free(elem);
 	}
 
 	if (load)
@@ -5220,7 +5254,7 @@ socket_watcher(gpointer data, gint fd, GdkInputCondition cond)
 	if (n <= 0)
 		return;
 
-	create_new_tab(str, 1);
+	create_new_tab(str, NULL, 1);
 }
 
 int
@@ -5461,14 +5495,14 @@ main(int argc, char *argv[])
 	focus = restore_saved_tabs();
 
 	while (argc) {
-		create_new_tab(argv[0], focus);
+		create_new_tab(argv[0], NULL, focus);
 		focus = 0;
 
 		argc--;
 		argv++;
 	}
 	if (focus == 1)
-		create_new_tab(home, 1);
+		create_new_tab(home, NULL, 1);
 
 	if (enable_socket)
 		if ((s = build_socket()) != -1)

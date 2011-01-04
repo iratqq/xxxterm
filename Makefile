@@ -1,4 +1,4 @@
-# $xxxterm: Makefile,v 1.9 2011/01/03 00:53:15 marco Exp $
+# $xxxterm: Makefile,v 1.11 2011/01/04 01:33:24 marco Exp $
 
 PREFIX?=/usr/local
 BINDIR=${PREFIX}/bin
@@ -28,11 +28,11 @@ javascript.h: hinting.js input-focus.js
 
 beforeinstall:
 	mkdir -p ${PREFIX}/share/xxxterm
-	cp ${.CURDIR}/fightsoap16.jpg ${PREFIX}/share/xxxterm
-	cp ${.CURDIR}/fightsoap32.jpg ${PREFIX}/share/xxxterm
-	cp ${.CURDIR}/fightsoap48.jpg ${PREFIX}/share/xxxterm
-	cp ${.CURDIR}/fightsoap64.jpg ${PREFIX}/share/xxxterm
-	cp ${.CURDIR}/fightsoap128.jpg ${PREFIX}/share/xxxterm
+	cp ${.CURDIR}/xxxtermicon16.png ${PREFIX}/share/xxxterm
+	cp ${.CURDIR}/xxxtermicon32.png ${PREFIX}/share/xxxterm
+	cp ${.CURDIR}/xxxtermicon48.png ${PREFIX}/share/xxxterm
+	cp ${.CURDIR}/xxxtermicon64.png ${PREFIX}/share/xxxterm
+	cp ${.CURDIR}/xxxtermicon128.png ${PREFIX}/share/xxxterm
 
 ${PROG} ${OBJS} beforedepend: javascript.h
 

@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.190 2011/01/03 00:56:54 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.194 2011/01/04 03:09:32 marco Exp $ */
 /*
  * Copyright (c) 2010 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2010 Edd Barrett <vext01@gmail.com>
@@ -85,7 +85,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.190 2011/01/03 00:56:54 marco Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.194 2011/01/04 03:09:32 marco Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -136,11 +136,11 @@ u_int32_t		swm_debug = 0
 				    ~(GDK_BUTTON5_MASK))
 
 char		*icons[] = {
-	"fightsoap16.jpg",
-	"fightsoap32.jpg",
-	"fightsoap48.jpg",
-	"fightsoap64.jpg",
-	"fightsoap128.jpg"
+	"xxxtermicon16.png",
+	"xxxtermicon32.png",
+	"xxxtermicon48.png",
+	"xxxtermicon64.png",
+	"xxxtermicon128.png"
 };
 
 struct tab {
@@ -4416,15 +4416,20 @@ cmd_activate_cb(GtkEntry *entry, struct tab *t)
 		if (cmds[i].params) {
 			if (!strncmp(s, cmds[i].cmd, strlen(cmds[i].cmd))) {
 				cmds[i].arg.s = g_strdup(s);
-				cmds[i].func(t, &cmds[i].arg);
+				goto execute_command;
 			}
 		} else {
 			if (!strcmp(s, cmds[i].cmd))
-				cmds[i].func(t, &cmds[i].arg);
+				goto execute_command;
 		}
 
 done:
 	gtk_widget_hide(t->cmd);
+	return;
+
+execute_command:
+	gtk_widget_hide(t->cmd);
+	cmds[i].func(t, &cmds[i].arg);
 }
 
 void
@@ -4623,7 +4628,7 @@ undo_close_tab_push(const gchar *uri)
 {
 	struct undo	*u1, *u2;
 
-	u1      = g_malloc(sizeof(struct undo));
+	u1 = g_malloc(sizeof(struct undo));
 	u1->uri = g_malloc(strlen(uri) * sizeof(gchar));
 	snprintf(u1->uri, strlen(uri), "%s", uri);
 
@@ -4651,22 +4656,24 @@ delete_tab(struct tab *t)
 	if (t == NULL)
 		return;
 
+	/* halt all webkit activity */
+	webkit_web_view_stop_loading(t->wv);
+
 	/* Save URI of tab; so we can undo close tab. */
 	frame = webkit_web_view_get_main_frame(t->wv);
-	uri   = webkit_web_frame_get_uri(frame);
-	if (uri)
+	uri = webkit_web_frame_get_uri(frame);
+	if (uri && strlen(uri))
 		undo_close_tab_push(uri);
 
 	TAILQ_REMOVE(&tabs, t, entry);
-	if (TAILQ_EMPTY(&tabs))
-		create_new_tab(NULL, 1);
+	recalc_tabs();
 
 	gtk_widget_destroy(t->vbox);
-
 	g_free(t->user_agent);
 	g_free(t);
 
-	recalc_tabs();
+	if (TAILQ_EMPTY(&tabs))
+		create_new_tab(NULL, 1);
 }
 
 void

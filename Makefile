@@ -1,4 +1,4 @@
-# $xxxterm: Makefile,v 1.11 2011/01/04 01:33:24 marco Exp $
+# $xxxterm: Makefile,v 1.12 2011/01/04 15:50:14 marco Exp $
 
 PREFIX?=/usr/local
 BINDIR=${PREFIX}/bin
@@ -13,6 +13,7 @@ LDADD= -lutil
 LIBS+= gtk+-2.0
 LIBS+= webkit-1.0
 LIBS+= libsoup-2.4
+LIBS+= gnutls
 GTK_CFLAGS!= pkg-config --cflags $(LIBS)
 GTK_LDFLAGS!= pkg-config --libs $(LIBS)
 CFLAGS+= $(GTK_CFLAGS) -Wall -pthread

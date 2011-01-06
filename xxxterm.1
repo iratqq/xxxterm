@@ -1,4 +1,4 @@
-.\"	$xxxterm: xxxterm.1,v 1.47 2011/01/03 00:16:33 marco Exp $
+.\"	$xxxterm: xxxterm.1,v 1.52 2011/01/06 05:26:57 marco Exp $
 .\"
 .\" Copyright (c) 2010 Marco Peereboom <marco@peereboom.us>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: January 3 2011 $
+.Dd $Mdocdate: January 6 2011 $
 .Dt XXXTERM 1
 .Os
 .Sh NAME
@@ -191,6 +191,10 @@ then the URL http://www.google.com/search?q=foo is loaded when navigating to
 If set to a valid PEM file all server certificates will be validated against it.
 The URL bar will be colored green when the certificate is trusted and yellow when
 untrusted.
+.It Cm window_height
+Set the default height of the browser window.
+.It Cm window_width
+Set the default width of the browser window.
 .Pp
 If ssl_ca_file is not set then the URL bar will color all https connections red.
 .It Cm ssl_strict_certs
@@ -215,6 +219,12 @@ If there is a url specified it will be opened in a new tab in the already
 running
 .Nm
 session.
+.It Cm save_global_history
+If set the global history will be saved to ~/.xxxterm/history at quit
+and restored at startup. See the
+.Sx BINDINGS
+section below, for how the global history is accessed. Global history is
+not saved to disk by default.
 .It Cm runtime_settings
 This setting points to a filename in the .xxxterm work directory that contains
 runtime configuration entries.
@@ -278,10 +288,10 @@ Navigation:
 .Pp
 .Bl -tag -width "tabnew, tabedit, tabe [URI]" -offset indent -compact
 .It Cm F5, C-r, C-l
-Refresh page
-.It Cm Backspace
-Previous page
-.It Cm M-Left
+Reload page
+.It Cm C-R
+Reload page without using any cached data
+.It Cm Backspace, M-Left
 Previous page
 .It Cm S-BackSpace, M-Right
 Forward page
@@ -322,9 +332,9 @@ Toggle source view.
 Tab Manipulation:
 .Pp
 .Bl -tag -width "tabnew, tabedit, tabe [URI]" -offset indent -compact
-.It Cm C-T
+.It Cm C-t
 Create new tab with focus in URI entry
-.It Cm C-W
+.It Cm C-w
 Destroy current tab
 .It Cm U
 Undo close tab
@@ -394,6 +404,15 @@ Save open tabs and quit.
 The tabs will be restored next time
 .Nm
 is started.
+.It Cm cert, cert show
+Download and display certificate(s) of domain on tab.
+.It Cm cert save
+Save certificate into local store.
+Next time the site is visited it is compared against the store.
+If the certificate matches the address bar will be blue, if it doesn't the bar
+will be red.
+.It Cm ca
+Display CA certificate(s).
 .It Cm fav
 Show favorites
 .It Cm favadd
@@ -451,6 +470,12 @@ user specific settings.
 .Nm
 scratch directory.
 .El
+.Sh BUGS
+When save_global_history is enabled
+.Nm
+is supposed to, in addition to restoring the global history, color the
+visited links accordingly, however due to bug #51747 in WebKit this does
+not happen.
 .Sh HISTORY
 .Nm
 was inspired by vimprobable2 and the bloat in other UNIX web browsers.

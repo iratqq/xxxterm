@@ -1,6 +1,7 @@
-/* $xxxterm: xxxterm.c,v 1.195 2011/01/04 10:29:32 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.206 2011/01/06 05:20:02 marco Exp $ */
 /*
- * Copyright (c) 2010 Marco Peereboom <marco@peereboom.us>
+ * Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
+ * Copyright (c) 2011 Stevan Andjelkovic <stevan@student.chalmers.se>
  * Copyright (c) 2010 Edd Barrett <vext01@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -55,7 +56,9 @@
 #include <gdk/gdkkeysyms.h>
 #include <webkit/webkit.h>
 #include <libsoup/soup.h>
+#include <gnutls/gnutls.h>
 #include <JavaScriptCore/JavaScript.h>
+#include <gnutls/x509.h>
 
 #include "javascript.h"
 /*
@@ -85,7 +88,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.195 2011/01/04 10:29:32 marco Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.206 2011/01/06 05:20:02 marco Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -219,6 +222,8 @@ struct undo {
         TAILQ_ENTRY(undo)	entry;
         gchar			*uri;
 	GList			*history;
+	int			back; /* Keeps track of how many back
+				       * history items there are. */
 };
 TAILQ_HEAD(undo_tailq, undo);
 
@@ -233,11 +238,13 @@ struct karg {
 /* defines */
 #define XT_NAME			("XXXTerm")
 #define XT_DIR			(".xxxterm")
+#define XT_CERT_DIR		("certs/")
 #define XT_CONF_FILE		("xxxterm.conf")
 #define XT_FAVS_FILE		("favorites")
 #define XT_SAVED_TABS_FILE	("saved_tabs")
 #define XT_RESTART_TABS_FILE	("restart_tabs")
 #define XT_SOCKET_FILE		("socket")
+#define XT_HISTORY_FILE		("history")
 #define XT_CB_HANDLED		(TRUE)
 #define XT_CB_PASSTHROUGH	(FALSE)
 #define XT_DOCTYPE		"<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.0 Transitional//EN' 'http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd'>"
@@ -332,6 +339,7 @@ struct karg {
 #define XT_NAV_BACK		(1)
 #define XT_NAV_FORWARD		(2)
 #define XT_NAV_RELOAD		(3)
+#define XT_NAV_RELOAD_CACHE	(4)
 
 #define XT_FOCUS_INVALID	(0)
 #define XT_FOCUS_URI		(1)
@@ -393,6 +401,8 @@ char		*sans_serif_font_family = NULL;
 char		*monospace_font_family = NULL;
 char		*default_encoding = NULL;
 char		*user_stylesheet = NULL;
+int		window_height = 768;
+int		window_width = 1024;
 unsigned	refresh_interval = 10; /* download refresh interval */
 int		enable_cookie_whitelist = 1;
 int		enable_js_whitelist = 1;
@@ -408,6 +418,7 @@ char		*http_proxy = NULL;
 char		download_dir[PATH_MAX];
 char		runtime_settings[PATH_MAX]; /* override of settings */
 int		allow_volatile_cookies = 0;
+int		save_global_history = 0; /* save global history to disk */
 
 struct settings;
 int		set_download_dir(struct settings *, char *);
@@ -516,9 +527,12 @@ struct settings {
 	{ "runtime_settings", XT_S_STR, 0 , NULL, NULL, &s_runtime },
 	{ "search_string", XT_S_STR, 0 , NULL, &search_string, NULL },
 	{ "session_timeout", XT_S_INT, 0 , &session_timeout, NULL, NULL },
+	{ "save_global_history", XT_S_INT, XT_SF_RESTART , &save_global_history, NULL, NULL },
 	{ "single_instance", XT_S_INT, XT_SF_RESTART , &single_instance, NULL, NULL },
 	{ "ssl_ca_file", XT_S_STR, 0 , NULL, &ssl_ca_file, NULL },
 	{ "ssl_strict_certs", XT_S_INT, 0 , &ssl_strict_certs, NULL, NULL },
+	{ "window_height", XT_S_INT, 0 , &window_height, NULL, NULL },
+	{ "window_width", XT_S_INT, 0 , &window_width, NULL, NULL },
 
 	/* runtime settings */
 	{ "alias", XT_S_STR, XT_SF_RUNTIME, NULL, NULL, &s_alias },
@@ -656,6 +670,7 @@ set_runtime_dir(struct settings *s, char *val)
 		    pwd->pw_dir, &val[1]);
 	else
 		strlcpy(runtime_settings, val, sizeof runtime_settings);
+
 	return (0);
 }
 
@@ -673,6 +688,7 @@ char			*cl_session_key;	/* cookie list */
 char			*fl_session_key;	/* favorites list */
 
 char			work_dir[PATH_MAX];
+char			certs_dir[PATH_MAX];
 char			cookie_file[PATH_MAX];
 SoupURI			*proxy_uri = NULL;
 SoupSession		*session;
@@ -683,7 +699,7 @@ struct mime_type_list	mtl;
 struct alias_list	aliases;
 
 /* protos */
-void			create_new_tab(char *, GList *, int);
+void			create_new_tab(char *, struct undo *, int);
 void			delete_tab(struct tab *);
 void			adjustfont_webkit(struct tab *, int);
 int			run_script(struct tab *, char *);
@@ -1376,9 +1392,91 @@ hint(struct tab *t, struct karg *args)
 	return (0);
 }
 
+/* Doesn't work fully, due to the following bug:
+ * https://bugs.webkit.org/show_bug.cgi?id=51747
+ */
+int
+restore_global_history(void)
+{
+	char			file[PATH_MAX];
+	FILE			*f;
+	struct history		*h;
+	gchar			*uri;
+	gchar			*title;
+
+	snprintf(file, sizeof file, "%s/%s/%s",
+	    pwd->pw_dir, XT_DIR, XT_HISTORY_FILE);
+
+	if ((f = fopen(file, "r")) == NULL) {
+		warnx("%s: fopen", __func__);
+		return (1);
+	}
+
+	for (;;) {
+		if ((uri = fparseln(f, NULL, NULL, NULL, 0)) == NULL)
+			if (feof(f) || ferror(f))
+				break;
+
+		if ((title = fparseln(f, NULL, NULL, NULL, 0)) == NULL)
+			if (feof(f) || ferror(f)) {
+				free(uri);
+				warnx("%s: broken history file\n", __func__);
+				return (1);
+			}
+
+		if (uri && strlen(uri) && title && strlen(title)) {
+			webkit_web_history_item_new_with_data(uri, title);
+			h = g_malloc(sizeof(struct history));
+			h->uri = g_strdup(uri);
+			h->title = g_strdup(title);
+			RB_INSERT(history_list, &hl, h);
+		} else {
+			warnx("%s: failed to restore history\n", __func__);
+			free(uri);
+			free(title);
+			return (1);
+		}
+
+		free(uri);
+		free(title);
+		uri = NULL;
+		title = NULL;
+	}
+
+	return (0);
+}
+
+int
+save_global_history_to_disk(void)
+{
+	char			file[PATH_MAX];
+	FILE			*f;
+	struct history		*h;
+
+	snprintf(file, sizeof file, "%s/%s/%s",
+	    pwd->pw_dir, XT_DIR, XT_HISTORY_FILE);
+
+	if ((f = fopen(file, "w")) == NULL) {
+		warnx("%s: fopen", __func__);
+		return (1);
+	}
+
+	RB_FOREACH_REVERSE(h, history_list, &hl) {
+		if (h->uri && h->title)
+			fprintf(f, "%s\n%s\n", h->uri, h->title);
+	}
+
+	fclose(f);
+
+	return (0);
+}
+
 int
 quit(struct tab *t, struct karg *args)
 {
+	if (save_global_history)
+		save_global_history_to_disk();
+
 	gtk_main_quit();
 
 	return (1);
@@ -1389,8 +1487,7 @@ restore_saved_tabs(void)
 {
 	char		file[PATH_MAX];
 	FILE		*f;
-	char		*line = NULL;
-	size_t		linelen;
+	char		*uri = NULL;
 	int		empty_saved_tabs_file = 1;
 	int		unlink_file = 0;
 	struct stat	sb;
@@ -1406,14 +1503,18 @@ restore_saved_tabs(void)
 	if ((f = fopen(file, "r")) == NULL)
 		return (empty_saved_tabs_file);
 
-	while (!feof(f)) {
-		line = fparseln(f, &linelen, NULL, NULL, 0);
-		if (line) {
-			create_new_tab(line, NULL, 1);
+	for (;;) {
+		if ((uri = fparseln(f, NULL, NULL, NULL, 0)) == NULL)
+			if (feof(f) || ferror(f))
+				break;
+
+		if (uri && strlen(uri)) {
+			create_new_tab(uri, NULL, 1);
 			empty_saved_tabs_file = 0;
 		}
-		free(line);
-		line = NULL;
+
+		free(uri);
+		uri = NULL;
 	}
 
 	fclose(f);
@@ -1757,6 +1858,7 @@ about(struct tab *t, struct karg *args)
 	    "Authors:"
 	    "<ul>"
 	    "<li>Marco Peereboom &lt;marco@peereboom.us&gt;</li>"
+	    "<li>Stevan Andjelkovic &lt;stevan@student.chalmers.se&gt;</li>"
 	    "<li>Edd Barrett &lt;vext01@gmail.com&gt; </li>"
 	    "</ul>"
 	    "Copyrights and licenses can be found on the XXXterm "
@@ -1934,6 +2036,414 @@ xtp_page_fl(struct tab *t, struct karg *args)
 	return (failed);
 }
 
+char *
+getparams(char *cmd, char *cmp)
+{
+	char			*rv = NULL;
+
+	if (cmd && cmp) {
+		if (!strncmp(cmd, cmp, strlen(cmp))) {
+			rv = cmd + strlen(cmp);
+			while (*rv == ' ')
+				rv++;
+			if (strlen(rv) == 0)
+				rv = NULL;
+		}
+	}
+
+	return (rv);
+}
+
+void
+show_certs(struct tab *t, gnutls_x509_crt_t *certs,
+    size_t cert_count, char *title)
+{
+	gnutls_datum_t		cinfo;
+	char			*tmp, *header, *body, *footer;
+	int			i;
+
+	header = g_strdup_printf("<title>%s</title><html><body>", title);
+	footer = g_strdup("</body></html>");
+	body = g_strdup("");
+
+	for (i = 0; i < cert_count; i++) {
+		if (gnutls_x509_crt_print(certs[i], GNUTLS_CRT_PRINT_FULL,
+		    &cinfo))
+			return;
+
+		tmp = body;
+		body = g_strdup_printf("%s<h2>Cert #%d</h2><pre>%s</pre>",
+		    body, i, cinfo.data);
+		gnutls_free(cinfo.data);
+		g_free(tmp);
+	}
+
+	tmp = g_strdup_printf("%s%s%s", header, body, footer);
+	g_free(header);
+	g_free(body);
+	g_free(footer);
+	webkit_web_view_load_string(t->wv, tmp, NULL, NULL, NULL);
+	g_free(tmp);
+}
+
+int
+ca_cmd(struct tab *t, struct karg *args)
+{
+	FILE			*f = NULL;
+	int			rv = 1, certs = 0, certs_read;
+	struct stat		sb;
+	gnutls_datum		dt;
+	gnutls_x509_crt_t	*c = NULL;
+	char			*certs_buf = NULL, *s;
+
+	/* yeah yeah stat race */
+	if (stat(ssl_ca_file, &sb)) {
+		warn("no CA file: %s", ssl_ca_file);
+		goto done;
+	}
+
+	if ((f = fopen(ssl_ca_file, "r")) == NULL)
+		return (1);
+
+	certs_buf = g_malloc(sb.st_size + 1);
+	if (fread(certs_buf, 1, sb.st_size, f) != sb.st_size) {
+		warn("certs");
+		goto done;
+	}
+	certs_buf[sb.st_size] = '\0';
+
+	s = certs_buf;
+	while ((s = strstr(s, "BEGIN CERTIFICATE"))) {
+		certs++;
+		s += strlen("BEGIN CERTIFICATE");
+	}
+
+	bzero(&dt, sizeof dt);
+	dt.data = certs_buf;
+	dt.size = sb.st_size;
+	c = g_malloc(sizeof(gnutls_x509_crt_t) * certs);
+	certs_read = gnutls_x509_crt_list_import(c, &certs, &dt, GNUTLS_X509_FMT_PEM, 0);
+	if (certs_read <= 0) {
+		warnx("couldn't read certs");
+		goto done;
+	}
+	show_certs(t, c, certs_read, "Certificate Authority Certificates");
+done:
+	if (c)
+		g_free(c);
+	if (certs_buf)
+		g_free(certs_buf);
+	if (f)
+		fclose(f);
+
+	return (rv);
+}
+
+int
+connect_socket_from_uri(char *uri, char *domain, size_t domain_sz)
+{
+	SoupURI			*su;
+	struct addrinfo		hints, *res = NULL, *ai;
+	int			s = -1, on;
+	char			port[8];
+
+	su = soup_uri_new(uri);
+	if (su == NULL)
+		goto done;
+	if (!SOUP_URI_VALID_FOR_HTTP(su))
+		goto done;
+
+	snprintf(port, sizeof port, "%d", su->port);
+	bzero(&hints, sizeof(struct addrinfo));
+	hints.ai_flags = AI_CANONNAME;
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+
+	if (getaddrinfo(su->host, port, &hints, &res))
+		goto done;
+
+	for (ai = res; ai; ai = ai->ai_next) {
+		if (ai->ai_family != AF_INET && ai->ai_family != AF_INET6)
+			continue;
+
+		s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+		if (s < 0)
+			goto done;
+		if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on,
+			    sizeof(on)) == -1)
+			goto done;
+
+		if (connect(s, ai->ai_addr, ai->ai_addrlen) < 0)
+			goto done;
+	}
+
+	if (domain)
+		strlcpy(domain, su->host, domain_sz);
+done:
+	if (su)
+		soup_uri_free(su);
+	if (res)
+		freeaddrinfo(res);
+
+	return (s);
+}
+
+int
+stop_tls(gnutls_session_t gsession, gnutls_certificate_credentials_t xcred)
+{
+	if (gsession) {
+		gnutls_bye(gsession, GNUTLS_SHUT_RDWR);
+		gnutls_deinit(gsession);
+	}
+	if (xcred)
+		gnutls_certificate_free_credentials(xcred);
+
+	return (0);
+}
+
+int
+start_tls(int s, gnutls_session_t *gs, gnutls_certificate_credentials_t *xc)
+{
+	gnutls_certificate_credentials_t xcred;
+	gnutls_session_t	gsession;
+	int			rv = 1;
+
+	if (gs == NULL || xc == NULL)
+		goto done;
+
+	gnutls_certificate_allocate_credentials(&xcred);
+	gnutls_certificate_set_x509_trust_file(xcred, ssl_ca_file,
+	    GNUTLS_X509_FMT_PEM);
+	gnutls_init(&gsession, GNUTLS_CLIENT);
+	gnutls_priority_set_direct(gsession, "PERFORMANCE", NULL);
+	gnutls_credentials_set(gsession, GNUTLS_CRD_CERTIFICATE, xcred);
+	gnutls_transport_set_ptr(gsession, (gnutls_transport_ptr_t)(long)s);
+	if ((rv = gnutls_handshake(gsession)) < 0) {
+		warnx("gnutls_handshake failed %d", rv);
+		stop_tls(gsession, xcred);
+		goto done;
+	}
+
+	gnutls_credentials_type_t cred;
+	cred = gnutls_auth_get_type(gsession);
+	if (cred != GNUTLS_CRD_CERTIFICATE) {
+		warnx("invalid credential type");
+		stop_tls(gsession, xcred);
+		goto done;
+	}
+
+	*gs = gsession;
+	*xc = xcred;
+	rv = 0;
+done:
+	return (rv);
+}
+
+int
+get_connection_certs(gnutls_session_t gsession, gnutls_x509_crt_t **certs,
+    size_t *cert_count)
+{
+	unsigned int		len;
+	const gnutls_datum_t	*cl;
+	gnutls_x509_crt_t	*all_certs;
+	int			i, rv = 1;
+
+	if (certs == NULL || cert_count == NULL)
+		goto done;
+	if (gnutls_certificate_type_get(gsession) != GNUTLS_CRT_X509)
+		goto done;
+	cl = gnutls_certificate_get_peers(gsession, &len);
+	if (len == 0)
+		goto done;
+
+	all_certs = g_malloc(sizeof(gnutls_x509_crt_t) * len);
+	for (i = 0; i < len; i++) {
+		gnutls_x509_crt_init(&all_certs[i]);
+		if (gnutls_x509_crt_import(all_certs[i], &cl[i],
+		    GNUTLS_X509_FMT_PEM < 0)) {
+			g_free(all_certs);
+			goto done;
+		    }
+	}
+
+	*certs = all_certs;
+	*cert_count = len;
+	rv = 0;
+done:
+	return (rv);
+}
+
+void
+free_connection_certs(gnutls_x509_crt_t *certs, size_t cert_count)
+{
+	int			i;
+
+	for (i = 0; i < cert_count; i++)
+		gnutls_x509_crt_deinit(certs[i]);
+	g_free(certs);
+}
+
+void
+save_certs(struct tab *t, gnutls_x509_crt_t *certs,
+    size_t cert_count, char *domain)
+{
+	size_t			cert_buf_sz;
+	char			cert_buf[64 * 1024], file[PATH_MAX];
+	int			i;
+	FILE			*f;
+	GdkColor		color;
+
+	if (t == NULL || certs == NULL || cert_count <= 0 || domain == NULL)
+		return;
+
+	snprintf(file, sizeof file, "%s/%s", certs_dir, domain);
+	if ((f = fopen(file, "w")) == NULL) {
+		warn("save_certs");
+		return;
+	}
+
+	for (i = 0; i < cert_count; i++) {
+		cert_buf_sz = sizeof cert_buf;
+		if (gnutls_x509_crt_export(certs[i], GNUTLS_X509_FMT_PEM,
+		    cert_buf, &cert_buf_sz)) {
+			warnx("gnutls_x509_crt_export");
+			goto done;
+		}
+		if (fwrite(cert_buf, cert_buf_sz, 1, f) != 1) {
+			warn("fwrite certs");
+			goto done;
+		}
+	}
+
+	/* not the best spot but oh well */
+	gdk_color_parse("lightblue", &color);
+	gtk_widget_modify_base(t->uri_entry, GTK_STATE_NORMAL, &color);
+done:
+	fclose(f);
+}
+
+int
+load_compare_cert(struct tab *t, struct karg *args)
+{
+	WebKitWebFrame		*frame;
+	char			*uri, domain[8182], file[PATH_MAX];
+	char			cert_buf[64 * 1024], r_cert_buf[64 * 1024];
+	int			s = -1, rv = 1, i;
+	size_t			cert_count;
+	FILE			*f = NULL;
+	size_t			cert_buf_sz;
+	gnutls_session_t	gsession;
+	gnutls_x509_crt_t	*certs;
+	gnutls_certificate_credentials_t xcred;
+
+	if (t == NULL)
+		return (1);
+
+	frame = webkit_web_view_get_main_frame(t->wv);
+	uri = (char *)webkit_web_frame_get_uri(frame);
+	if ((s = connect_socket_from_uri(uri, domain, sizeof domain)) == -1)
+		return (1);
+
+	/* go ssl/tls */
+	if (start_tls(s, &gsession, &xcred)) {
+		warnx("start_tls");
+		goto done;
+	}
+
+	/* get certs */
+	if (get_connection_certs(gsession, &certs, &cert_count)) {
+		warnx("get_connection_certs");
+		goto done;
+	}
+
+	snprintf(file, sizeof file, "%s/%s", certs_dir, domain);
+	if ((f = fopen(file, "r")) == NULL)
+		goto freeit;
+
+	for (i = 0; i < cert_count; i++) {
+		cert_buf_sz = sizeof cert_buf;
+		if (gnutls_x509_crt_export(certs[i], GNUTLS_X509_FMT_PEM,
+		    cert_buf, &cert_buf_sz)) {
+			warnx("gnutls_x509_crt_export");
+			goto freeit;
+		}
+		if (fread(r_cert_buf, cert_buf_sz, 1, f) != 1) {
+			warn("fread certs");
+			rv = -1; /* critical */
+			goto freeit;
+		}
+		if (bcmp(r_cert_buf, cert_buf, sizeof cert_buf_sz)) {
+			warnx("invalid cert");
+			rv = -1; /* critical */
+			goto freeit;
+		}
+	}
+
+	rv = 0;
+freeit:
+	if (f)
+		fclose(f);
+	free_connection_certs(certs, cert_count);
+done:
+	/* we close the socket first for speed */
+	if (s != -1)
+		close(s);
+	stop_tls(gsession, xcred);
+
+	return (rv);
+}
+
+int
+cert_cmd(struct tab *t, struct karg *args)
+{
+	WebKitWebFrame		*frame;
+	char			*uri, *action, domain[8182];
+	int			s = -1;
+	size_t			cert_count;
+	gnutls_session_t	gsession;
+	gnutls_x509_crt_t	*certs;
+	gnutls_certificate_credentials_t xcred;
+
+	if (t == NULL)
+		return (1);
+
+	if ((action = getparams(args->s, "cert")))
+		;
+	else
+		action = "show";
+
+	frame = webkit_web_view_get_main_frame(t->wv);
+	uri = (char *)webkit_web_frame_get_uri(frame);
+	if ((s = connect_socket_from_uri(uri, domain, sizeof domain)) == -1)
+		return (1);
+
+	/* go ssl/tls */
+	if (start_tls(s, &gsession, &xcred)) {
+		warnx("start_tls");
+		goto done;
+	}
+
+	/* get certs */
+	if (get_connection_certs(gsession, &certs, &cert_count)) {
+		warnx("get_connection_certs");
+		goto done;
+	}
+
+	if (!strcmp(action, "show"))
+		show_certs(t, certs, cert_count, "Certificate Chain");
+	else if (!strcmp(action, "save"))
+		save_certs(t, certs, cert_count, domain);
+
+	free_connection_certs(certs, cert_count);
+done:
+	/* we close the socket first for speed */
+	if (s != -1)
+		close(s);
+	stop_tls(gsession, xcred);
+
+	return (0);
+}
+
 int
 remove_cookie(int index)
 {
@@ -1996,7 +2506,7 @@ add_cookie(struct tab *t, struct karg *args)
 		goto done;
 	}
 
-	lt =g_strdup_printf("cookie_wl=%s", dom);
+	lt = g_strdup_printf("cookie_wl=%s", dom);
 
 	while (!feof(f)) {
 		line = fparseln(f, &linelen, NULL, NULL, 0);
@@ -2073,7 +2583,7 @@ add_js(struct tab *t, struct karg *args)
 		goto done;
 	}
 
-	lt =g_strdup_printf("js_wl=%s", dom);
+	lt = g_strdup_printf("js_wl=%s", dom);
 
 	while (!feof(f)) {
 		line = fparseln(f, &linelen, NULL, NULL, 0);
@@ -2179,6 +2689,9 @@ navaction(struct tab *t, struct karg *args)
 	case XT_NAV_RELOAD:
 		webkit_web_view_reload(t->wv);
 		break;
+	case XT_NAV_RELOAD_CACHE:
+		webkit_web_view_reload_bypass_cache(t->wv);
+		break;
 	}
 	return (XT_CB_PASSTHROUGH);
 }
@@ -2262,24 +2775,6 @@ move(struct tab *t, struct karg *args)
 	return (XT_CB_HANDLED);
 }
 
-char *
-getparams(char *cmd, char *cmp)
-{
-	char			*rv = NULL;
-
-	if (cmd && cmp) {
-		if (!strncmp(cmd, cmp, strlen(cmp))) {
-			rv = cmd + strlen(cmp);
-			while (*rv == ' ')
-				rv++;
-			if (strlen(rv) == 0)
-				rv = NULL;
-		}
-	}
-
-	return (rv);
-}
-
 int
 tabaction(struct tab *t, struct karg *args)
 {
@@ -2333,8 +2828,7 @@ tabaction(struct tab *t, struct karg *args)
 		} else {
 			undo_count--;
 			u = TAILQ_FIRST(&undos);
-			DPRINTF("%s: uri: %s", __func__, u->uri);
-			create_new_tab(u->uri, u->history, 1);
+			create_new_tab(u->uri, u, 1);
 
 			TAILQ_REMOVE(&undos, u, entry);
 			g_free(u->uri);
@@ -2476,11 +2970,13 @@ command(struct tab *t, struct karg *args)
 		if (!s) /* FALL THROUGH? */
 			s = ":tabnew ";
 		frame = webkit_web_view_get_main_frame(t->wv);
-		uri   = webkit_web_frame_get_uri(frame);
-		sz = sizeof(gchar) * (strlen(s) + strlen(uri));
-		ss = g_malloc(sz);
-		snprintf(ss, sz, "%s%s", s, uri);
-		s = ss;
+		uri = webkit_web_frame_get_uri(frame);
+		if (uri && strlen(uri)) {
+			sz = sizeof(gchar) * (strlen(s) + strlen(uri));
+			ss = g_malloc(sz);
+			snprintf(ss, sz, "%s%s", s, uri);
+			s = ss;
+		}
 		break;
 	default:
 		warnx("command: invalid command %c\n", args->i);
@@ -2947,30 +3443,7 @@ search(struct tab *t, struct karg *args)
 
 	return (XT_CB_HANDLED);
 }
-#if 0
-int
-mnprintf(char **buf, int *len, char *fmt, ...)
-{
-	int			x, old_len;
-	va_list			ap;
 
-	va_start(ap, fmt);
-
-	old_len = *len;
-	x = vsnprintf(*buf, *len, fmt, ap);
-	if (x == -1)
-		err(1, "mnprintf");
-	if (old_len < x)
-		errx(1, "mnprintf: buffer overflow");
-
-	*buf += x;
-	*len -= x;
-
-	va_end(ap);
-
-	return (0);
-}
-#endif
 struct settings_args {
 	char		**body;
 	int		i;
@@ -3052,81 +3525,7 @@ set(struct tab *t, struct karg *args)
 	} else {
 		fprintf(stderr, "pars %s\n", pars);
 	}
-#if 0
-	struct mime_type	*m;
-	char			b[16 * 1024], *s, *pars;
-	int			l;
 
-	if (t == NULL || args == NULL)
-		errx(1, "set");
-
-	DNPRINTF(XT_D_CMD, "set: tab %d\n",
-	    t->tab_id);
-
-	s = b;
-	l = sizeof b;
-
-	if ((pars = getparams(args->s, "set")) == NULL) {
-		mnprintf(&s, &l, "<html><body><pre>");
-		mnprintf(&s, &l, "ctrl_click_focus\t= %d<br>", ctrl_click_focus);
-		mnprintf(&s, &l, "cookies_enabled\t\t= %d<br>", cookies_enabled);
-		mnprintf(&s, &l, "default_font_size\t= %d<br>", default_font_size);
-		mnprintf(&s, &l, "default_font_family\t= %d<br>", default_font_family);
-		mnprintf(&s, &l, "serif_font_family\t= %d<br>", serif_font_family);
-		mnprintf(&s, &l, "sans_serif_font_family\t= %d<br>", sans_serif_font_family);
-		mnprintf(&s, &l, "monospace_font_family\t= %d<br>", monospace_font_family);
-		mnprintf(&s, &l, "default_encoding\t= %s<br>", default_encoding);
-		mnprintf(&s, &l, "user_stylesheet\t= %d<br>", user_stylesheet);
-		mnprintf(&s, &l, "enable_plugins\t\t= %d<br>", enable_plugins);
-		mnprintf(&s, &l, "enable_scripts\t\t= %d<br>", enable_scripts);
-		mnprintf(&s, &l, "fancy_bar\t\t= %d<br>", fancy_bar);
-		mnprintf(&s, &l, "home\t\t\t= %s<br>", home);
-		TAILQ_FOREACH(m, &mtl, entry) {
-			mnprintf(&s, &l, "mime_type\t\t= %s%s,%s<br>",
-			    m->mt_type, m->mt_default ? "*" : "", m->mt_action);
-		}
-		mnprintf(&s, &l, "proxy_uri\t\t= %s<br>", proxy_uri);
-		mnprintf(&s, &l, "read_only_cookies\t= %d<br>", read_only_cookies);
-		mnprintf(&s, &l, "search_string\t\t= %s<br>", search_string);
-		mnprintf(&s, &l, "showurl\t\t\t= %d<br>", showurl);
-		mnprintf(&s, &l, "showtabs\t\t= %d<br>", showtabs);
-		mnprintf(&s, &l, "tabless\t\t\t= %d<br>", tabless);
-		mnprintf(&s, &l, "download_dir\t\t= %s<br>", download_dir);
-		mnprintf(&s, &l, "</pre></body></html>");
-
-		webkit_web_view_load_string(t->wv,
-		    b,
-		    NULL,
-		    NULL,
-		    "about:config");
-		goto done;
-	}
-
-	/* XXX this sucks donkey balls and is a POC only */
-	int			x;
-	char			*e;
-	if (!strncmp(pars, "enable_scripts ", strlen("enable_scripts"))) {
-		s = pars + strlen("enable_scripts");
-		x = strtol(s, &e, 10);
-		if (s[0] == '\0' || *e != '\0')
-			webkit_web_view_load_string(t->wv,
-			    "<html><body>invalid value</body></html>",
-			    NULL,
-			    NULL,
-			    "about:error");
-
-		enable_scripts = x;
-		g_object_set((GObject *)t->settings,
-		    "enable-scripts", enable_scripts, (char *)NULL);
-		webkit_web_view_set_settings(t->wv, t->settings);
-	}
-
-done:
-	if (args->s) {
-		g_free(args->s);
-		args->s = NULL;
-	}
-#endif
 	return (XT_CB_PASSTHROUGH);
 }
 
@@ -3177,7 +3576,7 @@ restart(struct tab *t, struct karg *args)
 
 /* inherent to GTK not all keys will be caught at all times */
 /* XXX sort key bindings */
-struct key {
+struct key_bindings {
 	guint		mask;
 	guint		use_in_entry;
 	guint		key;
@@ -3191,6 +3590,7 @@ struct key {
 	{ GDK_SHIFT_MASK,	0,	GDK_question,	command,	{.i = '?'} },
 	{ GDK_SHIFT_MASK,	0,	GDK_colon,	command,	{.i = ':'} },
 	{ GDK_CONTROL_MASK,	0,	GDK_q,		quit,		{0} },
+	{ GDK_MOD1_MASK,	0,	GDK_q,		restart,	{0} },
 	{ GDK_CONTROL_MASK,	0,	GDK_j,		toggle_js,	{.i = XT_WL_TOGGLE} },
 	{ GDK_MOD1_MASK,	0,	GDK_c,		toggle_cwl,	{.i = XT_WL_TOGGLE} },
 	{ GDK_CONTROL_MASK,	0,	GDK_s,		toggle_src,	{0} },
@@ -3222,6 +3622,7 @@ struct key {
 	{ GDK_MOD1_MASK,	0,	GDK_Right,	navaction,	{.i = XT_NAV_FORWARD} },
 	{ 0,			0,	GDK_F5,		navaction,	{.i = XT_NAV_RELOAD} },
 	{ GDK_CONTROL_MASK,	0,	GDK_r,		navaction,	{.i = XT_NAV_RELOAD} },
+	{ GDK_CONTROL_MASK|GDK_SHIFT_MASK, 0, GDK_R,	navaction,	{.i = XT_NAV_RELOAD_CACHE} },
 	{ GDK_CONTROL_MASK,	0,	GDK_l,		navaction,	{.i = XT_NAV_RELOAD} },
 	{ GDK_MOD1_MASK,	1,	GDK_f,		xtp_page_fl,	{0} },
 
@@ -3292,7 +3693,9 @@ struct cmd {
 	{ "fav",		0,	xtp_page_fl,		{0} },
 	{ "favadd",		0,	add_favorite,		{0} },
 	{ "jsadd",		0,	add_js,			{0} },
-	{ "cookieadd",		0,	add_cookie,			{0} },
+	{ "cookieadd",		0,	add_cookie,		{0} },
+	{ "cert",		1,	cert_cmd,			{0} },
+	{ "ca",			0,	ca_cmd,			{0} },
 	{ "dl"		,	0,	xtp_page_dl,		{0} },
 	{ "h"		,	0,	xtp_page_hl,		{0} },
 	{ "hist"	,	0,	xtp_page_hl,		{0} },
@@ -3705,6 +4108,7 @@ show_ca_status(struct tab *t, const char *uri)
 	SoupMessage		*message;
 	GdkColor		color;
 	gchar			*col_str = "white";
+	int			r;
 
 	DNPRINTF(XT_D_URL, "show_ca_status: %d %s %s\n",
 	    ssl_strict_certs, ssl_ca_file, uri);
@@ -3734,7 +4138,13 @@ show_ca_status(struct tab *t, const char *uri)
 		col_str = "green";
 		goto done;
 	} else {
-		col_str = "yellow";
+		r = load_compare_cert(t, NULL);
+		if (r == 0)
+			col_str = "lightblue";
+		else if (r == 1)
+			col_str = "yellow";
+		else
+			col_str = "red";
 		goto done;
 	}
 done:
@@ -4543,7 +4953,7 @@ create_window(void)
 	GtkWidget		*w;
 
 	w = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-	gtk_window_set_default_size(GTK_WINDOW(w), 1024, 768);
+	gtk_window_set_default_size(GTK_WINDOW(w), window_width, window_height);
 	gtk_widget_set_name(w, "xxxterm");
 	gtk_window_set_wmclass(GTK_WINDOW(w), "xxxterm", "XXXTerm");
 	g_signal_connect(G_OBJECT(w), "delete_event",
@@ -4566,6 +4976,7 @@ create_toolbar(struct tab *t)
 		gtk_widget_set_sensitive(GTK_WIDGET(t->backward), FALSE);
 		g_signal_connect(G_OBJECT(t->backward), "clicked",
 		    G_CALLBACK(backward_cb), t);
+		gtk_widget_set_size_request(GTK_WIDGET(t->backward), -1, -1);
 		gtk_box_pack_start(GTK_BOX(b), GTK_WIDGET(t->backward), FALSE,
 		    FALSE, 0);
 
@@ -4575,6 +4986,7 @@ create_toolbar(struct tab *t)
 		gtk_widget_set_sensitive(GTK_WIDGET(t->forward), FALSE);
 		g_signal_connect(G_OBJECT(t->forward), "clicked",
 		    G_CALLBACK(forward_cb), t);
+		gtk_widget_set_size_request(GTK_WIDGET(t->forward), -1, -1);
 		gtk_box_pack_start(GTK_BOX(b), GTK_WIDGET(t->forward), FALSE,
 		    FALSE, 0);
 
@@ -4583,6 +4995,7 @@ create_toolbar(struct tab *t)
 		gtk_widget_set_sensitive(GTK_WIDGET(t->stop), FALSE);
 		g_signal_connect(G_OBJECT(t->stop), "clicked",
 		    G_CALLBACK(stop_cb), t);
+		gtk_widget_set_size_request(GTK_WIDGET(t->stop), -1, -1);
 		gtk_box_pack_start(GTK_BOX(b), GTK_WIDGET(t->stop), FALSE,
 		    FALSE, 0);
 
@@ -4593,6 +5006,7 @@ create_toolbar(struct tab *t)
 		gtk_widget_set_sensitive(GTK_WIDGET(t->js_toggle), TRUE);
 		g_signal_connect(G_OBJECT(t->js_toggle), "clicked",
 		    G_CALLBACK(js_toggle_cb), t);
+		gtk_widget_set_size_request(GTK_WIDGET(t->js_toggle), -1, -1);
 		gtk_box_pack_start(GTK_BOX(b), GTK_WIDGET(t->js_toggle), FALSE,
 		    FALSE, 0);
 	}
@@ -4603,6 +5017,7 @@ create_toolbar(struct tab *t)
 	g_signal_connect(G_OBJECT(t->uri_entry), "key-press-event",
 	    (GCallback)entry_key_cb, t);
 	gtk_box_pack_start(GTK_BOX(b), t->uri_entry, TRUE, TRUE, 0);
+	gtk_widget_set_size_request(GTK_WIDGET(b), -1, 32);
 
 	/* search entry */
 	if (fancy_bar && search_string) {
@@ -4612,6 +5027,7 @@ create_toolbar(struct tab *t)
 		    G_CALLBACK(activate_search_entry_cb), t);
 		g_signal_connect(G_OBJECT(t->search_entry), "key-press-event",
 		    (GCallback)entry_key_cb, t);
+		gtk_widget_set_size_request(t->search_entry, -1, -1);
 		gtk_box_pack_start(GTK_BOX(b), t->search_entry, FALSE, FALSE, 0);
 	}
 
@@ -4630,13 +5046,13 @@ recalc_tabs(void)
 int
 undo_close_tab_save(struct tab *t)
 {
-	int				n;
+	int				m, n;
 	const gchar			*uri;
 	struct undo			*u1, *u2;
 	WebKitWebFrame                  *frame;
 	WebKitWebBackForwardList        *bfl;
-	GList                           *list, *elem;
-	WebKitWebHistoryItem            *hi1, *hi2;
+	GList                           *items;
+	WebKitWebHistoryItem            *item;
 
 	frame = webkit_web_view_get_main_frame(t->wv);
 	uri = webkit_web_frame_get_uri(frame);
@@ -4648,13 +5064,36 @@ undo_close_tab_save(struct tab *t)
 	u1->uri = g_strdup(uri);
 
 	bfl = webkit_web_view_get_back_forward_list(t->wv);
-	n = webkit_web_back_forward_list_get_back_length(bfl);
-	list = webkit_web_back_forward_list_get_back_list_with_limit(bfl, n);
 
-	for (elem = list; elem; elem = elem->next) {
-		hi1 = elem->data;
-		hi2 = webkit_web_history_item_copy(hi1);
-		u1->history = g_list_prepend(u1->history, hi2);
+	m = webkit_web_back_forward_list_get_forward_length(bfl);
+	n = webkit_web_back_forward_list_get_back_length(bfl);
+	u1->back = n;
+
+	/* forward history */
+	items = webkit_web_back_forward_list_get_forward_list_with_limit(bfl, m);
+
+	while (items) {
+		item = items->data;
+		u1->history = g_list_prepend(u1->history,
+		    webkit_web_history_item_copy(item));
+		items = g_list_next(items);
+	}
+
+	/* current item */
+	if (m) {
+		item = webkit_web_back_forward_list_get_current_item(bfl);
+		u1->history = g_list_prepend(u1->history,
+		    webkit_web_history_item_copy(item));
+	}
+
+	/* back history */
+	items = webkit_web_back_forward_list_get_back_list_with_limit(bfl, n);
+
+	while (items) {
+		item = items->data;
+		u1->history = g_list_prepend(u1->history,
+		    webkit_web_history_item_copy(item));
+		items = g_list_next(items);
 	}
 
 	TAILQ_INSERT_HEAD(&undos, u1, entry);
@@ -4722,16 +5161,15 @@ append_tab(struct tab *t)
 }
 
 void
-create_new_tab(char *title, GList *history, int focus)
+create_new_tab(char *title, struct undo *u, int focus)
 {
-	struct tab		*t, *tt;
-	int			load = 1, id, notfound;
-	char			*newuri = NULL;
-	GtkWidget		*image, *b, *bb;
-	WebKitWebHistoryItem	*hi;
-	GList			*elem;
-	WebKitWebBackForwardList *bfl;
-
+	struct tab			*t, *tt;
+	int				load = 1, id, notfound;
+	char				*newuri = NULL;
+	GtkWidget			*image, *b, *bb;
+	WebKitWebHistoryItem		*item;
+	GList				*items;
+	WebKitWebBackForwardList	*bfl;
 
 	DNPRINTF(XT_D_TAB, "create_new_tab: title %s focus %d\n", title, focus);
 
@@ -4774,10 +5212,11 @@ create_new_tab(char *title, GList *history, int focus)
 	bb = gtk_button_new();
 	gtk_button_set_focus_on_click(GTK_BUTTON(bb), FALSE);
 	image = gtk_image_new_from_stock(GTK_STOCK_CLOSE, GTK_ICON_SIZE_MENU);
-	gtk_container_add(GTK_CONTAINER(bb), image);
+	gtk_widget_set_size_request(GTK_WIDGET(image), -1, -1);
+	gtk_container_add(GTK_CONTAINER(bb), GTK_WIDGET(image));
 	gtk_widget_set_name(bb, "my-close-button");
-	gtk_widget_set_size_request(t->label, 100, -1);
-	gtk_widget_set_size_request(b, 130, -1);
+	gtk_widget_set_size_request(t->label, 100, 0);
+	gtk_widget_set_size_request(b, 130, 0);
 	gtk_notebook_set_homogeneous_tabs(notebook, TRUE);
 
 	gtk_box_pack_start(GTK_BOX(b), bb, FALSE, FALSE, 0);
@@ -4877,21 +5316,28 @@ create_new_tab(char *title, GList *history, int focus)
 		    t->tab_id);
 	}
 
-	/* restore the tab's history */
-	if (history) {
-		for (elem = history; elem; elem = elem->next) {
-			hi  = elem->data;
-			bfl = webkit_web_view_get_back_forward_list(t->wv);
-			webkit_web_back_forward_list_add_item(bfl, hi);
-		}
-		g_list_free(history);
-		g_list_free(elem);
-	}
-
 	if (load)
 		webkit_web_view_load_uri(t->wv, title);
 	else
 		gtk_widget_grab_focus(GTK_WIDGET(t->uri_entry));
+
+	/* restore the tab's history */
+	if (u && u->history) {
+		bfl = webkit_web_view_get_back_forward_list(t->wv);
+
+		items = u->history;
+		while (items) {
+			item = items->data;
+			webkit_web_back_forward_list_add_item(bfl, item);
+			items = g_list_next(items);
+		}
+
+		item = g_list_nth_data(u->history, u->back);
+		webkit_web_view_go_to_back_forward_item(t->wv, item);
+
+		g_list_free(items);
+		g_list_free(u->history);
+	}
 
 	if (newuri)
 		g_free(newuri);
@@ -4992,9 +5438,12 @@ create_canvas(void)
 
 	abtn = gtk_button_new();
 	arrow = gtk_arrow_new(GTK_ARROW_DOWN, GTK_SHADOW_NONE);
+	gtk_widget_set_size_request(arrow, -1, 0);
 	gtk_container_add(GTK_CONTAINER(abtn), arrow);
+	gtk_widget_set_size_request(abtn, -1, 20);
 	gtk_notebook_set_action_widget(notebook, abtn, GTK_PACK_END);
 
+	gtk_widget_set_size_request(vbox, -1, 0);
 	gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(notebook), TRUE, TRUE, 0);
 
 	g_object_connect((GObject*)notebook,
@@ -5379,6 +5828,8 @@ main(int argc, char *argv[])
 	TAILQ_INIT(&aliases);
 	TAILQ_INIT(&undos);
 
+	gnutls_global_init();
+
 	/* generate session keys for xtp pages */
 	generate_xtp_session_key(&dl_session_key);
 	generate_xtp_session_key(&hl_session_key);
@@ -5412,12 +5863,31 @@ main(int argc, char *argv[])
 	if (stat(work_dir, &sb)) {
 		if (mkdir(work_dir, S_IRWXU) == -1)
 			err(1, "mkdir work_dir");
+		if (stat(work_dir, &sb))
+			err(1, "stat work_dir");
 	}
 	if (S_ISDIR(sb.st_mode) == 0)
 		errx(1, "%s not a dir", work_dir);
 	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
 		warnx("fixing invalid permissions on %s", work_dir);
 		if (chmod(work_dir, S_IRWXU) == -1)
+			err(1, "chmod");
+	}
+
+	/* certs dir */
+	snprintf(certs_dir, sizeof certs_dir, "%s/%s/%s",
+	    pwd->pw_dir, XT_DIR, XT_CERT_DIR);
+	if (stat(certs_dir, &sb)) {
+		if (mkdir(certs_dir, S_IRWXU) == -1)
+			err(1, "mkdir certs_dir");
+		if (stat(certs_dir, &sb))
+			err(1, "stat certs_dir");
+	}
+	if (S_ISDIR(sb.st_mode) == 0)
+		errx(1, "%s not a dir", certs_dir);
+	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
+		warnx("fixing invalid permissions on %s", certs_dir);
+		if (chmod(certs_dir, S_IRWXU) == -1)
 			err(1, "chmod");
 	}
 
@@ -5431,6 +5901,8 @@ main(int argc, char *argv[])
 	if (stat(download_dir, &sb)) {
 		if (mkdir(download_dir, S_IRWXU) == -1)
 			err(1, "mkdir download_dir");
+		if (stat(download_dir, &sb))
+			err(1, "stat download_dir");
 	}
 	if (S_ISDIR(sb.st_mode) == 0)
 		errx(1, "%s not a dir", download_dir);
@@ -5454,6 +5926,7 @@ main(int argc, char *argv[])
 	snprintf(file, sizeof file, "%s/cookies.txt", work_dir);
 	setup_cookies(file);
 
+	/* certs */
 	if (ssl_ca_file) {
 		if (stat(ssl_ca_file, &sb)) {
 			warn("no CA file: %s", ssl_ca_file);
@@ -5492,6 +5965,9 @@ main(int argc, char *argv[])
 	/* go graphical */
 	create_canvas();
 
+	if (save_global_history)
+		restore_global_history();
+
 	focus = restore_saved_tabs();
 
 	while (argc) {
@@ -5509,6 +5985,8 @@ main(int argc, char *argv[])
 			gdk_input_add(s, GDK_INPUT_READ, socket_watcher, NULL);
 
 	gtk_main();
+
+	gnutls_global_deinit();
 
 	return (0);
 }

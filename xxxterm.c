@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.216 2011/01/07 03:14:17 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.219 2011/01/07 17:07:10 marco Exp $ */
 /*
  * Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2011 Stevan Andjelkovic <stevan@student.chalmers.se>
@@ -88,7 +88,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.216 2011/01/07 03:14:17 marco Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.219 2011/01/07 17:07:10 marco Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -423,6 +423,7 @@ char		runtime_settings[PATH_MAX]; /* override of settings */
 int		allow_volatile_cookies = 0;
 int		save_global_history = 0; /* save global history to disk */
 char		*user_agent = NULL;
+int		save_rejected_cookies = 0;
 
 struct settings;
 int		set_download_dir(struct settings *, char *);
@@ -535,9 +536,11 @@ struct settings {
 	{ "search_string", XT_S_STR, 0 , NULL, &search_string, NULL },
 	{ "session_timeout", XT_S_INT, 0 , &session_timeout, NULL, NULL },
 	{ "save_global_history", XT_S_INT, XT_SF_RESTART , &save_global_history, NULL, NULL },
+	{ "save_rejected_cookies", XT_S_INT, XT_SF_RESTART , &save_rejected_cookies, NULL, NULL },
 	{ "single_instance", XT_S_INT, XT_SF_RESTART , &single_instance, NULL, NULL },
 	{ "ssl_ca_file", XT_S_STR, 0 , NULL, &ssl_ca_file, NULL },
 	{ "ssl_strict_certs", XT_S_INT, 0 , &ssl_strict_certs, NULL, NULL },
+	{ "user_agent", XT_S_STR, 0 , NULL, &user_agent, NULL },
 	{ "window_height", XT_S_INT, 0 , &window_height, NULL, NULL },
 	{ "window_width", XT_S_INT, 0 , &window_width, NULL, NULL },
 
@@ -701,6 +704,7 @@ SoupURI			*proxy_uri = NULL;
 SoupSession		*session;
 SoupCookieJar		*s_cookiejar;
 SoupCookieJar		*p_cookiejar;
+FILE			*r_cookie_f;
 
 struct mime_type_list	mtl;
 struct alias_list	aliases;
@@ -1844,10 +1848,26 @@ focus(struct tab *t, struct karg *args)
 int
 stats(struct tab *t, struct karg *args)
 {
-	char			*stats;
-
+	char			*stats, *s, line[64 * 1024];
+	uint64_t		line_count = 0;
 	if (t == NULL)
 		errx(1, "stats");
+
+	line[0] = '\0';
+	if (save_rejected_cookies) {
+		rewind(r_cookie_f);
+		for (;;) {
+			s = fgets(line, sizeof line, r_cookie_f);
+			if (s == NULL || feof(r_cookie_f) ||
+			    ferror(r_cookie_f))
+				break;
+			line_count++;
+		}
+		/* just in case */
+		fseek(r_cookie_f, 0, SEEK_END);
+		snprintf(line, sizeof line,
+		    "<br>Cookies blocked(*) total: %llu", line_count);
+	}
 
 	stats = g_strdup_printf(XT_DOCTYPE
 	    "<html>"
@@ -1856,12 +1876,13 @@ stats(struct tab *t, struct karg *args)
 	    "</head>"
 	    "<h1>Statistics</h1>"
 	    "<body>"
-	    "Cookies blocked(*) this session: %llu\n"
+	    "Cookies blocked(*) this session: %llu"
+	    "%s"
 	    "<p><small><b>*</b> results vary based on settings"
 	    "</body>"
 	    "</html>",
-	   blocked_cookies
-	    );
+	   blocked_cookies,
+	   line);
 
 	webkit_web_view_load_string(t->wv, stats, NULL, NULL, "");
 	g_free(stats);
@@ -2593,6 +2614,7 @@ wl_save(struct tab *t, struct karg *args, int js)
 	uri = (char *)webkit_web_frame_get_uri(frame);
 	dom = find_domain(uri, 1);
 	if (uri == NULL || dom == NULL) {
+		/* XXX this needs to be generalized */
 		webkit_web_view_load_string(t->wv,
 		    "<html><body>Can't add domain to JavaScript white list</body></html>",
 		    NULL,
@@ -3260,8 +3282,9 @@ xtp_page_cl(struct tab *t, struct karg *args)
 {
 	char			*header, *body, *footer, *page, *tmp;
 	int			i = 1; /* all ids start 1 */
-	GSList			*cf;
+	GSList			*sc, *pc, *pc_start;
 	SoupCookie		*c;
+	char			*type;
 
 	DNPRINTF(XT_D_CMD, "%s", __func__);
 
@@ -3282,6 +3305,7 @@ xtp_page_cl(struct tab *t, struct karg *args)
 
 	/* body */
 	body = g_strdup_printf("<div align='center'><table><tr>"
+	    "<th>Type</th>"
 	    "<th>Name</th>"
 	    "<th>Value</th>"
 	    "<th>Domain</th>"
@@ -3291,14 +3315,24 @@ xtp_page_cl(struct tab *t, struct karg *args)
 	    "<th>HTTP_only</th>"
 	    "<th>Remove</th></tr>\n");
 
-	cf = soup_cookie_jar_all_cookies(s_cookiejar);
+	sc = soup_cookie_jar_all_cookies(s_cookiejar);
+	pc = soup_cookie_jar_all_cookies(p_cookiejar);
+	pc_start = pc;
 
-	for (; cf; cf = cf->next) {
-		c = cf->data;
+	for (; sc; sc = sc->next) {
+		c = sc->data;
+
+		type = "Session";
+		for (pc = pc_start; pc; pc = pc->next)
+			if (soup_cookie_equal(pc->data, c)) {
+				type = "Session + Persistent";
+				break;
+			}
 
 		tmp = body;
 		body = g_strdup_printf(
 		    "%s\n<tr>"
+		    "<td style='width: 3%%; text-align: center'>%s</td>"
 		    "<td style='width: 10%%; word-break: break-all'>%s</td>"
 		    "<td style='width: 20%%; word-break: break-all'>%s</td>"
 		    "<td style='width: 10%%; word-break: break-all'>%s</td>"
@@ -3309,6 +3343,7 @@ xtp_page_cl(struct tab *t, struct karg *args)
 		    "<td style='width: 3%%; text-align: center'>"
 		    "<a href='%s%d/%s/%d/%d'>X</a></td></tr>\n",
 		    body,
+		    type,
 		    c->name,
 		    c->value,
 		    c->domain,
@@ -3328,7 +3363,9 @@ xtp_page_cl(struct tab *t, struct karg *args)
 		g_free(tmp);
 		i++;
 	}
-	soup_cookies_free(cf);
+
+	soup_cookies_free(sc);
+	soup_cookies_free(pc);
 
 	/* small message if there are none */
 	if (i == 1) {
@@ -5053,10 +5090,14 @@ create_browser(struct tab *t)
 	/* set defaults */
 	t->settings = webkit_web_settings_new();
 
-	g_object_get((GObject *)t->settings, "user-agent", &strval,
-	    (char *)NULL);
-	t->user_agent = g_strdup_printf("%s %s+", strval, version);
-	g_free(strval);
+	if (user_agent == NULL) {
+		g_object_get((GObject *)t->settings, "user-agent", &strval,
+		    (char *)NULL);
+		t->user_agent = g_strdup_printf("%s %s+", strval, version);
+		g_free(strval);
+	} else {
+		t->user_agent = g_strdup(user_agent);
+	}
 
 	setup_webkit(t);
 
@@ -5724,6 +5765,20 @@ soup_cookie_jar_add_cookie(SoupCookieJar *jar, SoupCookie *cookie)
 		DNPRINTF(XT_D_COOKIE,
 		    "soup_cookie_jar_add_cookie: reject %s\n",
 		    cookie->domain);
+		if (save_rejected_cookies) {
+			fseek(r_cookie_f, 0, SEEK_END);
+			fprintf(r_cookie_f, "%s%s\t%s\t%s\t%s\t%lu\t%s\t%s\n",
+			    cookie->http_only ? "#HttpOnly_" : "",
+			    cookie->domain,
+			    *cookie->domain == '.' ? "TRUE" : "FALSE",
+			    cookie->path,
+			    cookie->secure ? "TRUE" : "FALSE",
+			    cookie->expires ?
+			        (gulong)soup_date_to_time_t(cookie->expires) :
+			        0,
+			    cookie->name,
+			    cookie->value);
+		}
 		if (!allow_volatile_cookies)
 			return;
 	}
@@ -5748,8 +5803,10 @@ soup_cookie_jar_add_cookie(SoupCookieJar *jar, SoupCookie *cookie)
 }
 
 void
-setup_cookies(char *file)
+setup_cookies(void)
 {
+	char			file[PATH_MAX];
+
 	set_hook((void *)&_soup_cookie_jar_add_cookie,
 	    "soup_cookie_jar_add_cookie");
 	set_hook((void *)&_soup_cookie_jar_delete_cookie,
@@ -5763,8 +5820,19 @@ setup_cookies(char *file)
 	 * functions.
 	 * do not alter order of these operations.
 	 */
+
+	/* rejected cookies */
+	if (save_rejected_cookies) {
+		snprintf(file, sizeof file, "%s/rejected.txt", work_dir);
+		if ((r_cookie_f = fopen(file, "a+")) == NULL)
+			err(1, "reject cookie file");
+	}
+
+	/* persistent cookies */
+	snprintf(file, sizeof file, "%s/cookies.txt", work_dir);
 	p_cookiejar = soup_cookie_jar_text_new(file, read_only_cookies);
 
+	/* session cookies */
 	s_cookiejar = soup_cookie_jar_new();
 	g_object_set(G_OBJECT(s_cookiejar), SOUP_COOKIE_JAR_ACCEPT_POLICY,
 	    cookie_policy, (void *)NULL);
@@ -6085,8 +6153,7 @@ main(int argc, char *argv[])
 
 	/* cookies */
 	session = webkit_get_default_session();
-	snprintf(file, sizeof file, "%s/cookies.txt", work_dir);
-	setup_cookies(file);
+	setup_cookies();
 
 	/* certs */
 	if (ssl_ca_file) {

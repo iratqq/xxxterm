@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.206 2011/01/06 05:20:02 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.216 2011/01/07 03:14:17 marco Exp $ */
 /*
  * Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2011 Stevan Andjelkovic <stevan@student.chalmers.se>
@@ -88,7 +88,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.206 2011/01/06 05:20:02 marco Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.216 2011/01/07 03:14:17 marco Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -157,10 +157,10 @@ struct tab {
 	GtkWidget		*toolbar;
 	GtkWidget		*browser_win;
 	GtkWidget		*cmd;
-	GtkToolItem		*backward;
-	GtkToolItem		*forward;
-	GtkToolItem		*stop;
-	GtkToolItem		*js_toggle;
+	GtkWidget		*backward;
+	GtkWidget		*forward;
+	GtkWidget		*stop;
+	GtkWidget		*js_toggle;
 	guint			tab_id;
 	WebKitWebView		*wv;
 
@@ -354,9 +354,11 @@ struct karg {
 
 #define XT_FONT_SET		(0)
 
-#define XT_WL_TOGGLE		(0)
-#define XT_WL_ENABLE		(1)
-#define XT_WL_DISABLE		(2)
+#define XT_WL_TOGGLE		(1<<0)
+#define XT_WL_ENABLE		(1<<1)
+#define XT_WL_DISABLE		(1<<2)
+#define XT_WL_FQDN		(1<<3) /* default */
+#define XT_WL_TOPLEVEL		(1<<4)
 
 #define XT_CMD_OPEN		(0)
 #define XT_CMD_OPEN_CURRENT	(1)
@@ -403,6 +405,7 @@ char		*default_encoding = NULL;
 char		*user_stylesheet = NULL;
 int		window_height = 768;
 int		window_width = 1024;
+int		icon_size = 2; /* 1 = smallest, 2+ = bigger */
 unsigned	refresh_interval = 10; /* download refresh interval */
 int		enable_cookie_whitelist = 1;
 int		enable_js_whitelist = 1;
@@ -419,6 +422,7 @@ char		download_dir[PATH_MAX];
 char		runtime_settings[PATH_MAX]; /* override of settings */
 int		allow_volatile_cookies = 0;
 int		save_global_history = 0; /* save global history to disk */
+char		*user_agent = NULL;
 
 struct settings;
 int		set_download_dir(struct settings *, char *);
@@ -428,6 +432,8 @@ int		add_alias(struct settings *, char *);
 int		add_mime_type(struct settings *, char *);
 int		add_cookie_wl(struct settings *, char *);
 int		add_js_wl(struct settings *, char *);
+void		button_set_stockid(GtkWidget *, char *);
+GtkWidget *	create_button(char *, char *, int);
 
 char		*get_cookie_policy(struct settings *);
 
@@ -521,6 +527,7 @@ struct settings {
 	{ "fancy_bar", XT_S_INT, XT_SF_RESTART , &fancy_bar, NULL, NULL },
 	{ "home", XT_S_STR, 0 , NULL, &home, NULL },
 	{ "http_proxy", XT_S_STR, 0 , NULL, &http_proxy, NULL },
+	{ "icon_size", XT_S_INT, 0 , &icon_size, NULL, NULL },
 	{ "read_only_cookies", XT_S_INT, 0 , &read_only_cookies, NULL, NULL },
 	{ "refresh_interval", XT_S_INT, 0 , &refresh_interval, NULL, NULL },
 	{ "resource_dir", XT_S_STR, 0 , NULL, &resource_dir, NULL },
@@ -1111,7 +1118,7 @@ walk_js_wl(struct settings *s,
 int
 add_js_wl(struct settings *s, char *entry)
 {
-	wl_add(entry, &js_wl, 1 /* not used */);
+	wl_add(entry, &js_wl, 1 /* persistent */);
 	return (0);
 }
 
@@ -1175,6 +1182,30 @@ wl_find_uri(const gchar *s, struct domain_list *wl)
 			g_free(ss);
 			return (r);
 		}
+
+	return (NULL);
+}
+
+char *
+get_toplevel_domain(char *domain)
+{
+	char			*s;
+	int			found = 0;
+
+	if (domain == NULL)
+		return (NULL);
+	if (strlen(domain) < 2)
+		return (NULL);
+
+	s = &domain[strlen(domain) - 1];
+	while (s != domain) {
+		if (*s == '.') {
+			found++;
+			if (found == 2)
+				return (s);
+		}
+		s--;
+	}
 
 	return (NULL);
 }
@@ -1671,7 +1702,8 @@ toggle_cwl(struct tab *t, struct karg *args)
 {
 	WebKitWebFrame		*frame;
 	struct domain		*d;
-	char			*uri, *dom;
+	char			*uri;
+	char			*dom = NULL, *dom_toggle = NULL;
 	int			es;
 
 	if (args == NULL)
@@ -1686,16 +1718,21 @@ toggle_cwl(struct tab *t, struct karg *args)
 	else
 		es = 1;
 
-	if (args->i == XT_WL_TOGGLE)
+	if (args->i & XT_WL_TOGGLE)
 		es = !es;
-	else if (args->i == XT_WL_ENABLE && es != 1)
+	else if ((args->i & XT_WL_ENABLE) && es != 1)
 		es = 1;
-	else if (args->i == XT_WL_DISABLE && es != 0)
+	else if ((args->i & XT_WL_DISABLE) && es != 0)
 		es = 0;
+
+	if (args->i & XT_WL_TOPLEVEL)
+		dom_toggle = get_toplevel_domain(dom);
+	else
+		dom_toggle = dom;
 
 	if (es) {
 		/* enable cookies for domain */
-		wl_add(dom, &c_wl, 0);
+		wl_add(dom_toggle, &c_wl, 0);
 	} else {
 		/* disable cookies for domain */
 		RB_REMOVE(domain_list, &c_wl, d);
@@ -1710,66 +1747,59 @@ toggle_cwl(struct tab *t, struct karg *args)
 int
 toggle_js(struct tab *t, struct karg *args)
 {
-	int			es, i;
+	int			es;
 	WebKitWebFrame		*frame;
-	const gchar		*s;
-	gchar			*ss;
+	const gchar		*uri;
 	struct domain		*d;
+	char			*dom = NULL, *dom_toggle = NULL;
 
 	if (args == NULL)
 		return (0);
 
 	g_object_get((GObject *)t->settings,
 	    "enable-scripts", &es, (char *)NULL);
-	if (args->i == XT_WL_TOGGLE)
+	if (args->i & XT_WL_TOGGLE)
 		es = !es;
-	else if (args->i == XT_WL_ENABLE && es != 1)
+	else if ((args->i & XT_WL_ENABLE) && es != 1)
 		es = 1;
-	else if (args->i == XT_WL_DISABLE && es != 0)
+	else if ((args->i & XT_WL_DISABLE) && es != 0)
 		es = 0;
 	else
 		return (0);
 
 	frame = webkit_web_view_get_main_frame(t->wv);
-	s = (gchar *)webkit_web_frame_get_uri(frame);
-	/* this code is shared with wl_find_uri, refactor */
-	if (s == NULL)
-		return (NULL);
+	uri = (char *)webkit_web_frame_get_uri(frame);
+	dom = find_domain(uri, 1);
+	if (uri == NULL || dom == NULL) {
+		webkit_web_view_load_string(t->wv,
+		    "<html><body>Can't toggle domain in JavaScript white list</body></html>",
+		    NULL,
+		    NULL,
+		    NULL);
+		goto done;
+	}
 
-	if (!strncmp(s, "http://", strlen("http://")))
-		s = &s[strlen("http://")];
-	else if (!strncmp(s, "https://", strlen("https://")))
-		s = &s[strlen("https://")];
+	if (args->i & XT_WL_TOPLEVEL)
+		dom_toggle = get_toplevel_domain(dom);
+	else
+		dom_toggle = dom;
 
-	if (strlen(s) < 2)
-		return (NULL);
-
-	ss = g_strdup(s);
-	for (i = 0; i < strlen(s) + 1; i++)
-		/* chop string at first slash */
-		if (ss[i] == '/' || ss[i] == '\0') {
-			ss[i] = '\0';
-			if (es) {
-				gtk_tool_button_set_stock_id(
-				    GTK_TOOL_BUTTON(t->js_toggle),
-				    GTK_STOCK_MEDIA_PLAY);
-				wl_add(ss, &js_wl, 0 /* not used */);
-			} else {
-				d = wl_find(ss, &js_wl);
-				if (d)
-					RB_REMOVE(domain_list, &js_wl, d);
-				gtk_tool_button_set_stock_id(
-				    GTK_TOOL_BUTTON(t->js_toggle),
-				    GTK_STOCK_MEDIA_PAUSE);
-			}
-			g_object_set((GObject *)t->settings,
-			    "enable-scripts", es, (char *)NULL);
-			webkit_web_view_set_settings(t->wv, t->settings);
-			webkit_web_view_reload(t->wv);
-			goto done;
-		}
+	if (es) {
+		button_set_stockid(t->js_toggle, GTK_STOCK_MEDIA_PLAY);
+		wl_add(dom_toggle, &js_wl, 0 /* session */);
+	} else {
+		d = wl_find(dom_toggle, &js_wl);
+		if (d)
+			RB_REMOVE(domain_list, &js_wl, d);
+		button_set_stockid(t->js_toggle, GTK_STOCK_MEDIA_PAUSE);
+	}
+	g_object_set((GObject *)t->settings,
+	    "enable-scripts", es, (char *)NULL);
+	webkit_web_view_set_settings(t->wv, t->settings);
+	webkit_web_view_reload(t->wv);
 done:
-	g_free(ss);
+	if (dom)
+		g_free(dom);
 	return (0);
 }
 
@@ -1778,7 +1808,7 @@ js_toggle_cb(GtkWidget *w, struct tab *t)
 {
 	struct karg		a;
 
-	a.i = XT_WL_TOGGLE;
+	a.i = XT_WL_TOGGLE | XT_WL_FQDN;
 	toggle_js(t, &a);
 }
 
@@ -2142,10 +2172,13 @@ done:
 int
 connect_socket_from_uri(char *uri, char *domain, size_t domain_sz)
 {
-	SoupURI			*su;
+	SoupURI			*su = NULL;
 	struct addrinfo		hints, *res = NULL, *ai;
 	int			s = -1, on;
 	char			port[8];
+
+	if (uri && !g_str_has_prefix(uri, "https://"))
+		goto done;
 
 	su = soup_uri_new(uri);
 	if (su == NULL)
@@ -2191,10 +2224,8 @@ done:
 int
 stop_tls(gnutls_session_t gsession, gnutls_certificate_credentials_t xcred)
 {
-	if (gsession) {
-		gnutls_bye(gsession, GNUTLS_SHUT_RDWR);
+	if (gsession)
 		gnutls_deinit(gsession);
-	}
 	if (xcred)
 		gnutls_certificate_free_credentials(xcred);
 
@@ -2471,97 +2502,84 @@ remove_cookie(int index)
 }
 
 int
-add_cookie(struct tab *t, struct karg *args)
+wl_show(struct tab *t, char *args, char *title, struct domain_list *wl)
 {
-	char			file[PATH_MAX];
-	FILE			*f;
-	char			*line = NULL, *lt = NULL;
-	size_t			linelen;
-	WebKitWebFrame		*frame;
-	char			*dom = NULL, *uri;
-	struct karg		a;
-	struct domain		*d = NULL;
-	GSList			*cf;
-	SoupCookie		*ci, *c;
+	struct domain		*d;
+	char			*tmp, *header, *body, *footer;
+	int			p_js = 0, s_js = 0;
 
-	if (t == NULL)
+	if (g_str_has_prefix(args, "show a") ||
+	    !strcmp(args, "show")) {
+		/* show all */
+		p_js = 1;
+		s_js = 1;
+	} else if (g_str_has_prefix(args, "show p")) {
+		/* show persistent */
+		p_js = 1;
+	} else if (g_str_has_prefix(args, "show s")) {
+		/* show session */
+		s_js = 1;
+	} else
 		return (1);
 
-	if (runtime_settings[0] == '\0')
-		return (1);
+	header = g_strdup_printf("<title>%s</title><html><body><h1>%s</h1>",
+	    title, title);
+	footer = g_strdup("</body></html>");
+	body = g_strdup("");
 
-	snprintf(file, sizeof file, "%s/%s", work_dir, runtime_settings);
-	if ((f = fopen(file, "r+")) == NULL)
-		return (1);
-
-	frame = webkit_web_view_get_main_frame(t->wv);
-	uri = (char *)webkit_web_frame_get_uri(frame);
-	dom = find_domain(uri, 1);
-	if (uri == NULL || dom == NULL) {
-		webkit_web_view_load_string(t->wv,
-		    "<html><body>Can't add domain to Cookie white list</body></html>",
-		    NULL,
-		    NULL,
-		    NULL);
-		goto done;
-	}
-
-	lt = g_strdup_printf("cookie_wl=%s", dom);
-
-	while (!feof(f)) {
-		line = fparseln(f, &linelen, NULL, NULL, 0);
-		if (line == NULL)
-			continue;
-		if (!strcmp(line, lt))
-			goto done;
-		free(line);
-		line = NULL;
-	}
-
-	fprintf(f, "%s\n", lt);
-
-	a.i = XT_WL_ENABLE;
-	toggle_cwl(t, &a);
-	d = wl_find(dom, &c_wl);
-	if (d)
-		d->handy = 1;
-
-	/* find and add to persistent jar */
-	cf = soup_cookie_jar_all_cookies(s_cookiejar);
-	for (;cf; cf = cf->next) {
-		ci = cf->data;
-		if (!strcmp(dom, ci->domain) ||
-		    !strcmp(&dom[1], ci->domain)) /* deal with leading . */ {
-			c = soup_cookie_copy(ci);
-			_soup_cookie_jar_add_cookie(p_cookiejar, c);
+	/* p list */
+	if (p_js) {
+		tmp = body;
+		body = g_strdup_printf("%s<h2>Persitent</h2>", body);
+		g_free(tmp);
+		RB_FOREACH_REVERSE(d, domain_list, wl) {
+			if (d->handy == 0)
+				continue;
+			tmp = body;
+			body = g_strdup_printf("%s%s<br>", body, d->d);
+			g_free(tmp);
 		}
 	}
-	soup_cookies_free(cf);
 
-done:
-	if (line)
-		free(line);
-	if (dom)
-		g_free(dom);
-	if (lt)
-		g_free(lt);
-	fclose(f);
+	/* s list */
+	if (s_js) {
+		tmp = body;
+		body = g_strdup_printf("%s<h2>Session</h2>", body);
+		g_free(tmp);
+		RB_FOREACH_REVERSE(d, domain_list, wl) {
+			if (d->handy == 1)
+				continue;
+			tmp = body;
+			body = g_strdup_printf("%s%s", body, d->d);
+			g_free(tmp);
+		}
+	}
 
+	tmp = g_strdup_printf("%s%s%s", header, body, footer);
+	g_free(header);
+	g_free(body);
+	g_free(footer);
+	webkit_web_view_load_string(t->wv, tmp, NULL, NULL, NULL);
+	g_free(tmp);
 	return (0);
 }
 
 int
-add_js(struct tab *t, struct karg *args)
+wl_save(struct tab *t, struct karg *args, int js)
 {
 	char			file[PATH_MAX];
 	FILE			*f;
 	char			*line = NULL, *lt = NULL;
 	size_t			linelen;
 	WebKitWebFrame		*frame;
-	char			*dom = NULL, *uri;
+	char			*dom = NULL, *uri, *dom_save = NULL;
 	struct karg		a;
+	struct domain		*d;
+	GSList			*cf;
+	SoupCookie		*ci, *c;
+	int			flags;
 
-	if (t == NULL)
+	if (t == NULL || args == NULL)
 		return (1);
 
 	if (runtime_settings[0] == '\0')
@@ -2583,7 +2601,26 @@ add_js(struct tab *t, struct karg *args)
 		goto done;
 	}
 
-	lt = g_strdup_printf("js_wl=%s", dom);
+	if (g_str_has_prefix(args->s, "save d")) {
+		/* save domain */
+		if ((dom_save = get_toplevel_domain(dom)) == NULL) {
+			/* XXX this needs use feedback */
+			warnx("bad bad bad");
+			goto done;
+		}
+		flags = XT_WL_TOPLEVEL;
+	} else if (g_str_has_prefix(args->s, "save f") ||
+	    !strcmp(args->s, "save")) {
+		/* save fqdn */
+		dom_save = dom;
+		flags = XT_WL_FQDN;
+	} else {
+		/* XXX this needs use feedback */
+		warnx("invalid command");
+		goto done;
+	}
+
+	lt = g_strdup_printf("%s=%s", js ? "js_wl" : "cookie_wl", dom_save);
 
 	while (!feof(f)) {
 		line = fparseln(f, &linelen, NULL, NULL, 0);
@@ -2597,8 +2634,30 @@ add_js(struct tab *t, struct karg *args)
 
 	fprintf(f, "%s\n", lt);
 
-	a.i = XT_WL_TOGGLE;
-	toggle_js(t, &a);
+	a.i = XT_WL_ENABLE;
+	a.i |= flags;
+	if (js) {
+		d = wl_find(dom_save, &js_wl);
+		toggle_js(t, &a);
+	} else {
+		d = wl_find(dom_save, &c_wl);
+		toggle_cwl(t, &a);
+
+		/* find and add to persistent jar */
+		cf = soup_cookie_jar_all_cookies(s_cookiejar);
+		for (;cf; cf = cf->next) {
+			ci = cf->data;
+			if (!strcmp(dom_save, ci->domain) ||
+			    !strcmp(&dom_save[1], ci->domain)) /* deal with leading . */ {
+				c = soup_cookie_copy(ci);
+				_soup_cookie_jar_add_cookie(p_cookiejar, c);
+			}
+		}
+		soup_cookies_free(cf);
+	}
+	if (d)
+		d->handy = 1;
+
 done:
 	if (line)
 		free(line);
@@ -2607,6 +2666,66 @@ done:
 	if (lt)
 		g_free(lt);
 	fclose(f);
+
+	return (0);
+}
+
+int
+cookie_cmd(struct tab *t, struct karg *args)
+{
+	char			*cmd;
+	struct karg		a;
+
+	if ((cmd = getparams(args->s, "cookie")))
+		;
+	else
+		cmd = "show all";
+
+
+	if (g_str_has_prefix(cmd, "show")) {
+		wl_show(t, cmd, "Cookie White List", &c_wl);
+	} else if (g_str_has_prefix(cmd, "save")) {
+		a.s = cmd;
+		wl_save(t, &a, 0);
+	} else if (g_str_has_prefix(cmd, "toggle")) {
+		a.i = XT_WL_TOGGLE;
+		if (g_str_has_prefix(cmd, "toggle d"))
+			a.i |= XT_WL_TOPLEVEL;
+		else
+			a.i |= XT_WL_FQDN;
+		toggle_cwl(t, &a);
+	} else if (g_str_has_prefix(cmd, "delete")) {
+	}
+
+	return (0);
+}
+
+int
+js_cmd(struct tab *t, struct karg *args)
+{
+	char			*cmd;
+	struct karg		a;
+
+	if ((cmd = getparams(args->s, "js")))
+		;
+	else
+		cmd = "show all";
+
+
+	if (g_str_has_prefix(cmd, "show")) {
+		wl_show(t, cmd, "JavaScript White List", &js_wl);
+	} else if (g_str_has_prefix(cmd, "save")) {
+		a.s = cmd;
+		wl_save(t, &a, 1);
+	} else if (g_str_has_prefix(cmd, "toggle")) {
+		a.i = XT_WL_TOGGLE;
+		if (g_str_has_prefix(cmd, "toggle d"))
+			a.i |= XT_WL_TOPLEVEL;
+		else
+			a.i |= XT_WL_FQDN;
+		toggle_js(t, &a);
+	} else if (g_str_has_prefix(cmd, "delete")) {
+	}
 
 	return (0);
 }
@@ -2942,7 +3061,6 @@ command(struct tab *t, struct karg *args)
 	char			*s = NULL, *ss = NULL;
 	GdkColor		color;
 	const gchar		*uri;
-	size_t			sz;
 
 	if (t == NULL || args == NULL)
 		errx(1, "command");
@@ -2972,9 +3090,7 @@ command(struct tab *t, struct karg *args)
 		frame = webkit_web_view_get_main_frame(t->wv);
 		uri = webkit_web_frame_get_uri(frame);
 		if (uri && strlen(uri)) {
-			sz = sizeof(gchar) * (strlen(s) + strlen(uri));
-			ss = g_malloc(sz);
-			snprintf(ss, sz, "%s%s", s, uri);
+			ss = g_strdup_printf("%s%s", s, uri);
 			s = ss;
 		}
 		break;
@@ -3591,8 +3707,8 @@ struct key_bindings {
 	{ GDK_SHIFT_MASK,	0,	GDK_colon,	command,	{.i = ':'} },
 	{ GDK_CONTROL_MASK,	0,	GDK_q,		quit,		{0} },
 	{ GDK_MOD1_MASK,	0,	GDK_q,		restart,	{0} },
-	{ GDK_CONTROL_MASK,	0,	GDK_j,		toggle_js,	{.i = XT_WL_TOGGLE} },
-	{ GDK_MOD1_MASK,	0,	GDK_c,		toggle_cwl,	{.i = XT_WL_TOGGLE} },
+	{ GDK_CONTROL_MASK,	0,	GDK_j,		toggle_js,	{.i = XT_WL_TOGGLE | XT_WL_FQDN} },
+	{ GDK_MOD1_MASK,	0,	GDK_c,		toggle_cwl,	{.i = XT_WL_TOGGLE | XT_WL_FQDN} },
 	{ GDK_CONTROL_MASK,	0,	GDK_s,		toggle_src,	{0} },
 	{ 0,			0,	GDK_y,		yank_uri,	{0} },
 	{ 0,			0,	GDK_p,		paste_uri,	{.i = XT_PASTE_CURRENT_TAB} },
@@ -3692,9 +3808,9 @@ struct cmd {
 	{ "cookies",		0,	xtp_page_cl,		{0} },
 	{ "fav",		0,	xtp_page_fl,		{0} },
 	{ "favadd",		0,	add_favorite,		{0} },
-	{ "jsadd",		0,	add_js,			{0} },
-	{ "cookieadd",		0,	add_cookie,		{0} },
-	{ "cert",		1,	cert_cmd,			{0} },
+	{ "js",			2,	js_cmd,			{0} },
+	{ "cookie",		2,	cookie_cmd,		{0} },
+	{ "cert",		1,	cert_cmd,		{0} },
 	{ "ca",			0,	ca_cmd,			{0} },
 	{ "dl"		,	0,	xtp_page_dl,		{0} },
 	{ "h"		,	0,	xtp_page_hl,		{0} },
@@ -4095,7 +4211,7 @@ check_and_set_js(gchar *uri, struct tab *t)
 	    "enable-scripts", es, (char *)NULL);
 	webkit_web_view_set_settings(t->wv, t->settings);
 
-	gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(t->js_toggle),
+	button_set_stockid(t->js_toggle,
 	    es ? GTK_STOCK_MEDIA_PLAY : GTK_STOCK_MEDIA_PAUSE);
 }
 
@@ -4965,50 +5081,43 @@ create_window(void)
 GtkWidget *
 create_toolbar(struct tab *t)
 {
-	GtkWidget		*toolbar = NULL, *b;
+	GtkWidget		*toolbar = NULL, *b, *eb1;
 
 	b = gtk_hbox_new(FALSE, 0);
 	toolbar = b;
+	gtk_container_set_border_width(GTK_CONTAINER(toolbar), 0);
 
 	if (fancy_bar) {
 		/* backward button */
-		t->backward = gtk_tool_button_new_from_stock(GTK_STOCK_GO_BACK);
-		gtk_widget_set_sensitive(GTK_WIDGET(t->backward), FALSE);
+		t->backward = create_button("go-back", GTK_STOCK_GO_BACK, 0);
+		gtk_widget_set_sensitive(t->backward, FALSE);
 		g_signal_connect(G_OBJECT(t->backward), "clicked",
 		    G_CALLBACK(backward_cb), t);
-		gtk_widget_set_size_request(GTK_WIDGET(t->backward), -1, -1);
-		gtk_box_pack_start(GTK_BOX(b), GTK_WIDGET(t->backward), FALSE,
-		    FALSE, 0);
+		gtk_box_pack_start(GTK_BOX(b), t->backward, FALSE, FALSE, 0);
 
 		/* forward button */
-		t->forward =
-		    gtk_tool_button_new_from_stock(GTK_STOCK_GO_FORWARD);
-		gtk_widget_set_sensitive(GTK_WIDGET(t->forward), FALSE);
+		t->forward = create_button("go-forward",GTK_STOCK_GO_FORWARD, 0);
+		gtk_widget_set_sensitive(t->forward, FALSE);
 		g_signal_connect(G_OBJECT(t->forward), "clicked",
 		    G_CALLBACK(forward_cb), t);
-		gtk_widget_set_size_request(GTK_WIDGET(t->forward), -1, -1);
-		gtk_box_pack_start(GTK_BOX(b), GTK_WIDGET(t->forward), FALSE,
+		gtk_box_pack_start(GTK_BOX(b), t->forward, FALSE,
 		    FALSE, 0);
 
 		/* stop button */
-		t->stop = gtk_tool_button_new_from_stock(GTK_STOCK_STOP);
-		gtk_widget_set_sensitive(GTK_WIDGET(t->stop), FALSE);
+		t->stop = create_button("stop", GTK_STOCK_STOP, 0);
+		gtk_widget_set_sensitive(t->stop, FALSE);
 		g_signal_connect(G_OBJECT(t->stop), "clicked",
 		    G_CALLBACK(stop_cb), t);
-		gtk_widget_set_size_request(GTK_WIDGET(t->stop), -1, -1);
-		gtk_box_pack_start(GTK_BOX(b), GTK_WIDGET(t->stop), FALSE,
+		gtk_box_pack_start(GTK_BOX(b), t->stop, FALSE,
 		    FALSE, 0);
 
 		/* JS button */
-		t->js_toggle =
-		    gtk_tool_button_new_from_stock(enable_scripts ?
-		        GTK_STOCK_MEDIA_PLAY : GTK_STOCK_MEDIA_PAUSE);
-		gtk_widget_set_sensitive(GTK_WIDGET(t->js_toggle), TRUE);
+		t->js_toggle = create_button("js-toggle", enable_scripts ?
+		        GTK_STOCK_MEDIA_PLAY : GTK_STOCK_MEDIA_PAUSE, 0);
+		gtk_widget_set_sensitive(t->js_toggle, TRUE);
 		g_signal_connect(G_OBJECT(t->js_toggle), "clicked",
 		    G_CALLBACK(js_toggle_cb), t);
-		gtk_widget_set_size_request(GTK_WIDGET(t->js_toggle), -1, -1);
-		gtk_box_pack_start(GTK_BOX(b), GTK_WIDGET(t->js_toggle), FALSE,
-		    FALSE, 0);
+		gtk_box_pack_start(GTK_BOX(b), t->js_toggle, FALSE, FALSE, 0);
 	}
 
 	t->uri_entry = gtk_entry_new();
@@ -5016,11 +5125,14 @@ create_toolbar(struct tab *t)
 	    G_CALLBACK(activate_uri_entry_cb), t);
 	g_signal_connect(G_OBJECT(t->uri_entry), "key-press-event",
 	    (GCallback)entry_key_cb, t);
-	gtk_box_pack_start(GTK_BOX(b), t->uri_entry, TRUE, TRUE, 0);
-	gtk_widget_set_size_request(GTK_WIDGET(b), -1, 32);
+	eb1 = gtk_hbox_new(FALSE, 0);
+	gtk_container_set_border_width(GTK_CONTAINER(eb1), 1);
+	gtk_box_pack_start(GTK_BOX(eb1), t->uri_entry, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(b), eb1, TRUE, TRUE, 0);
 
 	/* search entry */
 	if (fancy_bar && search_string) {
+		GtkWidget *eb2;
 		t->search_entry = gtk_entry_new();
 		gtk_entry_set_width_chars(GTK_ENTRY(t->search_entry), 30);
 		g_signal_connect(G_OBJECT(t->search_entry), "activate",
@@ -5028,9 +5140,12 @@ create_toolbar(struct tab *t)
 		g_signal_connect(G_OBJECT(t->search_entry), "key-press-event",
 		    (GCallback)entry_key_cb, t);
 		gtk_widget_set_size_request(t->search_entry, -1, -1);
-		gtk_box_pack_start(GTK_BOX(b), t->search_entry, FALSE, FALSE, 0);
+		eb2 = gtk_hbox_new(FALSE, 0);
+		gtk_container_set_border_width(GTK_CONTAINER(eb2), 1);
+		gtk_box_pack_start(GTK_BOX(eb2), t->search_entry, TRUE, TRUE,
+		    0);
+		gtk_box_pack_start(GTK_BOX(b), eb2, FALSE, FALSE, 0);
 	}
-
 	return (toolbar);
 }
 
@@ -5123,13 +5238,12 @@ delete_tab(struct tab *t)
 
 	undo_close_tab_save(t);
 
-	TAILQ_REMOVE(&tabs, t, entry);
-	recalc_tabs();
-
 	gtk_widget_destroy(t->vbox);
 	g_free(t->user_agent);
 	g_free(t);
 
+	TAILQ_REMOVE(&tabs, t, entry);
+	recalc_tabs();
 	if (TAILQ_EMPTY(&tabs))
 		create_new_tab(NULL, NULL, 1);
 }
@@ -5166,7 +5280,7 @@ create_new_tab(char *title, struct undo *u, int focus)
 	struct tab			*t, *tt;
 	int				load = 1, id, notfound;
 	char				*newuri = NULL;
-	GtkWidget			*image, *b, *bb;
+	GtkWidget			*b, *bb;
 	WebKitWebHistoryItem		*item;
 	GList				*items;
 	WebKitWebBackForwardList	*bfl;
@@ -5193,15 +5307,6 @@ create_new_tab(char *title, struct undo *u, int focus)
 	t->vbox = gtk_vbox_new(FALSE, 0);
 
 	/* label + button for tab */
-	gtk_rc_parse_string(
-	    "style \"my-button-style\"\n"
-	    "{\n"
-	    "  GtkWidget::focus-padding = 0\n"
-	    "  GtkWidget::focus-line-width = 0\n"
-	    "  xthickness = 0\n"
-	    "  ythickness = 0\n"
-	    "}\n"
-	    "widget \"*.my-close-button\" style \"my-button-style\"");
 	b = gtk_hbox_new(FALSE, 0);
 	t->tab_content = b;
 
@@ -5209,12 +5314,7 @@ create_new_tab(char *title, struct undo *u, int focus)
 	t->spinner = gtk_spinner_new ();
 #endif
 	t->label = gtk_label_new(title);
-	bb = gtk_button_new();
-	gtk_button_set_focus_on_click(GTK_BUTTON(bb), FALSE);
-	image = gtk_image_new_from_stock(GTK_STOCK_CLOSE, GTK_ICON_SIZE_MENU);
-	gtk_widget_set_size_request(GTK_WIDGET(image), -1, -1);
-	gtk_container_add(GTK_CONTAINER(bb), GTK_WIDGET(image));
-	gtk_widget_set_name(bb, "my-close-button");
+	bb = create_button("my-close-button", GTK_STOCK_CLOSE, 1);
 	gtk_widget_set_size_request(t->label, 100, 0);
 	gtk_widget_set_size_request(b, 130, 0);
 	gtk_notebook_set_homogeneous_tabs(notebook, TRUE);
@@ -5420,6 +5520,55 @@ arrow_cb(GtkWidget *w, GdkEventButton *event, gpointer user_data)
 	return (FALSE /* propagate */);
 }
 
+int
+icon_size_map(int icon_size)
+{
+	if (icon_size <= GTK_ICON_SIZE_INVALID ||
+	    icon_size > GTK_ICON_SIZE_DIALOG)
+		return (GTK_ICON_SIZE_SMALL_TOOLBAR);
+
+	return (icon_size);
+}
+
+GtkWidget *
+create_button(char *name, char *stockid, int size)
+{
+	GtkWidget *button, *image;
+	char *rcstring;
+	int gtk_icon_size;
+	asprintf(&rcstring,
+	    "style \"%s-style\"\n"
+	    "{\n"
+	    "  GtkWidget::focus-padding = 0\n"
+	    "  GtkWidget::focus-line-width = 0\n"
+	    "  xthickness = 0\n"
+	    "  ythickness = 0\n"
+	    "}\n"
+	    "widget \"*.%s\" style \"%s-style\"",name,name,name);
+	gtk_rc_parse_string(rcstring);
+	free(rcstring);
+	button = gtk_button_new();
+	gtk_button_set_focus_on_click(GTK_BUTTON(button), FALSE);
+	gtk_icon_size = icon_size_map(size?size:icon_size);
+
+	image = gtk_image_new_from_stock(stockid, gtk_icon_size);
+	gtk_widget_set_size_request(GTK_WIDGET(image), -1, -1);
+	gtk_container_set_border_width(GTK_CONTAINER(button), 1);
+	gtk_container_add(GTK_CONTAINER(button), GTK_WIDGET(image));
+	gtk_widget_set_name(button, name);
+
+	return button;
+}
+
+void
+button_set_stockid(GtkWidget *button, char *stockid)
+{
+	GtkWidget *image;
+	image = gtk_image_new_from_stock(stockid, icon_size_map(icon_size));
+	gtk_widget_set_size_request(GTK_WIDGET(image), -1, -1);
+	gtk_button_set_image(GTK_BUTTON(button), image);
+}
+
 void
 create_canvas(void)
 {
@@ -5430,21 +5579,28 @@ create_canvas(void)
 	int			i;
 
 	vbox = gtk_vbox_new(FALSE, 0);
+	gtk_box_set_spacing(GTK_BOX(vbox), 0);
 	notebook = GTK_NOTEBOOK(gtk_notebook_new());
 	if (showtabs == 0)
-		gtk_notebook_set_show_tabs(GTK_NOTEBOOK(notebook), FALSE);
+		gtk_notebook_set_show_tabs(notebook, FALSE);
+	else {
+		gtk_notebook_set_tab_hborder(notebook, 0);
+		gtk_notebook_set_tab_vborder(notebook, 0);
+	}
+	gtk_notebook_set_show_border(notebook, FALSE);
 	gtk_notebook_set_scrollable(notebook, TRUE);
 	gtk_widget_set_can_focus(GTK_WIDGET(notebook), FALSE);
 
 	abtn = gtk_button_new();
 	arrow = gtk_arrow_new(GTK_ARROW_DOWN, GTK_SHADOW_NONE);
-	gtk_widget_set_size_request(arrow, -1, 0);
+	gtk_widget_set_size_request(arrow, -1, -1);
 	gtk_container_add(GTK_CONTAINER(abtn), arrow);
 	gtk_widget_set_size_request(abtn, -1, 20);
 	gtk_notebook_set_action_widget(notebook, abtn, GTK_PACK_END);
 
-	gtk_widget_set_size_request(vbox, -1, 0);
+	gtk_widget_set_size_request(GTK_WIDGET(notebook), -1, -1);
 	gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(notebook), TRUE, TRUE, 0);
+	gtk_widget_set_size_request(vbox, -1, -1);
 
 	g_object_connect((GObject*)notebook,
 	    "signal::switch-page", (GCallback)notebook_switchpage_cb, NULL,
@@ -5519,6 +5675,9 @@ soup_cookie_jar_delete_cookie(SoupCookieJar *jar, SoupCookie *c)
 
 	print_cookie("soup_cookie_jar_delete_cookie", c);
 
+	if (cookies_enabled == 0)
+		return;
+
 	if (jar == NULL || c == NULL)
 		return;
 
@@ -5547,6 +5706,9 @@ soup_cookie_jar_add_cookie(SoupCookieJar *jar, SoupCookie *cookie)
 
 	DNPRINTF(XT_D_COOKIE, "soup_cookie_jar_add_cookie: %p %p %p\n",
 	    jar, p_cookiejar, s_cookiejar);
+
+	if (cookies_enabled == 0)
+		return;
 
 	/* see if we are up and running */
 	if (p_cookiejar == NULL) {
@@ -5588,13 +5750,13 @@ soup_cookie_jar_add_cookie(SoupCookieJar *jar, SoupCookie *cookie)
 void
 setup_cookies(char *file)
 {
-	if (cookies_enabled == 0)
-		return;
-
 	set_hook((void *)&_soup_cookie_jar_add_cookie,
 	    "soup_cookie_jar_add_cookie");
 	set_hook((void *)&_soup_cookie_jar_delete_cookie,
 	    "soup_cookie_jar_delete_cookie");
+
+	if (cookies_enabled == 0)
+		return;
 
 	/*
 	 * the following code is intricate due to overriding several libsoup

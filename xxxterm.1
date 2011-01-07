@@ -1,4 +1,4 @@
-.\"	$xxxterm: xxxterm.1,v 1.52 2011/01/06 05:26:57 marco Exp $
+.\"	$xxxterm: xxxterm.1,v 1.55 2011/01/07 02:11:05 marco Exp $
 .\"
 .\" Copyright (c) 2010 Marco Peereboom <marco@peereboom.us>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: January 6 2011 $
+.Dd $Mdocdate: January 7 2011 $
 .Dt XXXTERM 1
 .Os
 .Sh NAME
@@ -143,6 +143,9 @@ validates that during startup.
 .It Cm fancy_bar
 Enables a backward, forward and stop button to the toolbar.
 Additionally if search_string is set it'll enable an entry box for searches.
+.It Cm icon_size
+Permits icon sizes to be changed if fancy_bar is enabled.
+Size 1 is small, 2 is normal, 3 and 4 are progressively larger.
 .It Cm refresh_interval
 Refresh interval while in the download manager.
 Default is 10.
@@ -417,18 +420,50 @@ Display CA certificate(s).
 Show favorites
 .It Cm favadd
 Add current page to favorites
-.It Cm jsadd
-Add current page domain as a JavaScript white list entry to the runtime
-configuration file.
-This action will also enable JavaScript if it is currently disabled for this
-domain.
-.It Cm cookieadd
-Add current page domain as a cookie white list entry to the runtime
-configuration file.
-This action will also allow cookies if it is currently disallowed for this
-domain.
-If there are volatile session cookies then those will be saved into the
-persistent cookie jar.
+.It Cm js
+The js command is used to manipulate the Java Script white list.
+Used by itself it expands to "js show all".
+.It Cm js show all
+Shows all persistent and session entries in the JS white list.
+.It Cm js show persistent
+Shows all persistent entries in the JS white list.
+.It Cm js show session
+Shows all session entries in the JS white list.
+.It Cm js save
+.It Cm js save fqdn
+Saves the current fully qualified domain name to the persitent white list.
+.It Cm js save domain
+Saves the top level domain name to the persitent white list.
+E.g. the www.peereboom.us domain would result in saving .peereboom.us .
+.Pp
+This action will enable Java Script if it is currently disabled for this entry.
+.It Cm js toggle
+.It Cm js toggle fqdn
+Toggle Java Script execution for the current FQDN.
+.It Cm js toggle domain
+Toggle Java Script execution for the current top level domain.
+.It Cm cookie
+The cookie command is used to manipulate the cookie white list.
+Used by itself it expands to "cookie show all".
+.It Cm cookie show all
+Shows all persistent and session entries in the cookie white list.
+.It Cm cookie show persistent
+Shows all persistent entries in the cookie white list.
+.It Cm cookie show session
+Shows all session entries in the cookie white list.
+.It Cm cookie save
+.It Cm cookie save fqdn
+Saves the current fully qualified domain name to the persitent white list.
+.It Cm cookie save domain
+Saves the top level domain name to the persitent white list.
+E.g. the www.peereboom.us domain would result in saving .peereboom.us .
+.Pp
+This action will enable cookies if it is currently disabled for this entry.
+.It Cm cookie toggle
+.It Cm cookie toggle fqdn
+Toggle Java Script execution for the current FQDN.
+.It Cm cookie toggle domain
+Toggle cookie support for the current top level domain.
 .It Cm dl
 Show download manager
 .It Cm print

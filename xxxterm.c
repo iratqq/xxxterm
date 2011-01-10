@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.219 2011/01/07 17:07:10 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.226 2011/01/09 14:28:15 marco Exp $ */
 /*
  * Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2011 Stevan Andjelkovic <stevan@student.chalmers.se>
@@ -88,7 +88,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.219 2011/01/07 17:07:10 marco Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.226 2011/01/09 14:28:15 marco Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -704,7 +704,7 @@ SoupURI			*proxy_uri = NULL;
 SoupSession		*session;
 SoupCookieJar		*s_cookiejar;
 SoupCookieJar		*p_cookiejar;
-FILE			*r_cookie_f;
+char			rc_fname[PATH_MAX];
 
 struct mime_type_list	mtl;
 struct alias_list	aliases;
@@ -1210,6 +1210,9 @@ get_toplevel_domain(char *domain)
 		}
 		s--;
 	}
+
+	if (found)
+		return (domain);
 
 	return (NULL);
 }
@@ -1850,23 +1853,25 @@ stats(struct tab *t, struct karg *args)
 {
 	char			*stats, *s, line[64 * 1024];
 	uint64_t		line_count = 0;
+	FILE			*r_cookie_f;
+
 	if (t == NULL)
 		errx(1, "stats");
 
 	line[0] = '\0';
 	if (save_rejected_cookies) {
-		rewind(r_cookie_f);
-		for (;;) {
-			s = fgets(line, sizeof line, r_cookie_f);
-			if (s == NULL || feof(r_cookie_f) ||
-			    ferror(r_cookie_f))
-				break;
-			line_count++;
+		if ((r_cookie_f = fopen(rc_fname, "r"))) {
+			for (;;) {
+				s = fgets(line, sizeof line, r_cookie_f);
+				if (s == NULL || feof(r_cookie_f) ||
+				    ferror(r_cookie_f))
+					break;
+				line_count++;
+			}
+			fclose(r_cookie_f);
+			snprintf(line, sizeof line,
+			    "<br>Cookies blocked(*) total: %llu", line_count);
 		}
-		/* just in case */
-		fseek(r_cookie_f, 0, SEEK_END);
-		snprintf(line, sizeof line,
-		    "<br>Cookies blocked(*) total: %llu", line_count);
 	}
 
 	stats = g_strdup_printf(XT_DOCTYPE
@@ -2263,6 +2268,9 @@ start_tls(int s, gnutls_session_t *gs, gnutls_certificate_credentials_t *xc)
 	if (gs == NULL || xc == NULL)
 		goto done;
 
+	bzero(&xcred, sizeof xcred);
+	bzero(&gsession, sizeof gsession);
+
 	gnutls_certificate_allocate_credentials(&xcred);
 	gnutls_certificate_set_x509_trust_file(xcred, ssl_ca_file,
 	    GNUTLS_X509_FMT_PEM);
@@ -2272,15 +2280,15 @@ start_tls(int s, gnutls_session_t *gs, gnutls_certificate_credentials_t *xc)
 	gnutls_transport_set_ptr(gsession, (gnutls_transport_ptr_t)(long)s);
 	if ((rv = gnutls_handshake(gsession)) < 0) {
 		warnx("gnutls_handshake failed %d", rv);
-		stop_tls(gsession, xcred);
+		gnutls_certificate_free_credentials(xcred);
 		goto done;
 	}
 
 	gnutls_credentials_type_t cred;
 	cred = gnutls_auth_get_type(gsession);
 	if (cred != GNUTLS_CRD_CERTIFICATE) {
-		warnx("invalid credential type");
-		stop_tls(gsession, xcred);
+		gnutls_deinit(gsession);
+		gnutls_certificate_free_credentials(xcred);
 		goto done;
 	}
 
@@ -2551,7 +2559,7 @@ wl_show(struct tab *t, char *args, char *title, struct domain_list *wl)
 	/* p list */
 	if (p_js) {
 		tmp = body;
-		body = g_strdup_printf("%s<h2>Persitent</h2>", body);
+		body = g_strdup_printf("%s<h2>Persistent</h2>", body);
 		g_free(tmp);
 		RB_FOREACH_REVERSE(d, domain_list, wl) {
 			if (d->handy == 0)
@@ -5274,16 +5282,16 @@ delete_tab(struct tab *t)
 	if (t == NULL)
 		return;
 
+	TAILQ_REMOVE(&tabs, t, entry);
+
 	/* halt all webkit activity */
 	webkit_web_view_stop_loading(t->wv);
-
 	undo_close_tab_save(t);
 
 	gtk_widget_destroy(t->vbox);
 	g_free(t->user_agent);
-
-	TAILQ_REMOVE(&tabs, t, entry);
 	g_free(t);
+
 	recalc_tabs();
 	if (TAILQ_EMPTY(&tabs))
 		create_new_tab(NULL, NULL, 1);
@@ -5744,6 +5752,7 @@ soup_cookie_jar_add_cookie(SoupCookieJar *jar, SoupCookie *cookie)
 {
 	struct domain		*d;
 	SoupCookie		*c;
+	FILE			*r_cookie_f;
 
 	DNPRINTF(XT_D_COOKIE, "soup_cookie_jar_add_cookie: %p %p %p\n",
 	    jar, p_cookiejar, s_cookiejar);
@@ -5766,6 +5775,8 @@ soup_cookie_jar_add_cookie(SoupCookieJar *jar, SoupCookie *cookie)
 		    "soup_cookie_jar_add_cookie: reject %s\n",
 		    cookie->domain);
 		if (save_rejected_cookies) {
+			if ((r_cookie_f = fopen(rc_fname, "a+")) == NULL)
+				err(1, "reject cookie file");
 			fseek(r_cookie_f, 0, SEEK_END);
 			fprintf(r_cookie_f, "%s%s\t%s\t%s\t%s\t%lu\t%s\t%s\n",
 			    cookie->http_only ? "#HttpOnly_" : "",
@@ -5778,6 +5789,8 @@ soup_cookie_jar_add_cookie(SoupCookieJar *jar, SoupCookie *cookie)
 			        0,
 			    cookie->name,
 			    cookie->value);
+			fflush(r_cookie_f);
+			fclose(r_cookie_f);
 		}
 		if (!allow_volatile_cookies)
 			return;
@@ -5822,11 +5835,8 @@ setup_cookies(void)
 	 */
 
 	/* rejected cookies */
-	if (save_rejected_cookies) {
-		snprintf(file, sizeof file, "%s/rejected.txt", work_dir);
-		if ((r_cookie_f = fopen(file, "a+")) == NULL)
-			err(1, "reject cookie file");
-	}
+	if (save_rejected_cookies)
+		snprintf(rc_fname, sizeof file, "%s/rejected.txt", work_dir);
 
 	/* persistent cookies */
 	snprintf(file, sizeof file, "%s/cookies.txt", work_dir);

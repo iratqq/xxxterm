@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.226 2011/01/09 14:28:15 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.239 2011/01/11 03:51:36 marco Exp $ */
 /*
  * Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2011 Stevan Andjelkovic <stevan@student.chalmers.se>
@@ -40,6 +40,7 @@
 #include <util.h>
 #include <pthread.h>
 #include <dlfcn.h>
+#include <errno.h>
 
 #ifdef __linux__
 #include "linux/tree.h"
@@ -88,7 +89,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.226 2011/01/09 14:28:15 marco Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.239 2011/01/11 03:51:36 marco Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -157,12 +158,16 @@ struct tab {
 	GtkWidget		*toolbar;
 	GtkWidget		*browser_win;
 	GtkWidget		*cmd;
+	GtkWidget		*oops;
 	GtkWidget		*backward;
 	GtkWidget		*forward;
 	GtkWidget		*stop;
 	GtkWidget		*js_toggle;
 	guint			tab_id;
 	WebKitWebView		*wv;
+
+	WebKitWebHistoryItem	*item;
+	WebKitWebBackForwardList	*bfl;
 
 	/* adjustments for browser */
 	GtkScrollbar		*sb_h;
@@ -488,12 +493,6 @@ struct special		s_download_dir = {
 	NULL
 };
 
-struct special		s_runtime = {
-	set_runtime_dir,
-	get_runtime_dir,
-	NULL
-};
-
 struct settings {
 	char		*name;
 	int		type;
@@ -532,7 +531,6 @@ struct settings {
 	{ "read_only_cookies", XT_S_INT, 0 , &read_only_cookies, NULL, NULL },
 	{ "refresh_interval", XT_S_INT, 0 , &refresh_interval, NULL, NULL },
 	{ "resource_dir", XT_S_STR, 0 , NULL, &resource_dir, NULL },
-	{ "runtime_settings", XT_S_STR, 0 , NULL, NULL, &s_runtime },
 	{ "search_string", XT_S_STR, 0 , NULL, &search_string, NULL },
 	{ "session_timeout", XT_S_INT, 0 , &session_timeout, NULL, NULL },
 	{ "save_global_history", XT_S_INT, XT_SF_RESTART , &save_global_history, NULL, NULL },
@@ -572,6 +570,51 @@ int			updating_fl_tabs = 0;
 char			*global_search;
 uint64_t		blocked_cookies = 0;
 
+void
+load_webkit_string(struct tab *t, const char *str)
+{
+	/* we set this to indicate we want to manually do navaction */
+	t->item = webkit_web_back_forward_list_get_current_item(t->bfl);
+	webkit_web_view_load_string(t->wv, str, NULL, NULL, NULL);
+}
+
+void
+hide_oops(struct tab *t)
+{
+	gtk_widget_hide(t->oops);
+}
+
+void
+hide_cmd(struct tab *t)
+{
+	gtk_widget_hide(t->cmd);
+}
+
+void
+show_cmd(struct tab *t)
+{
+	gtk_widget_hide(t->oops);
+	gtk_widget_show(t->cmd);
+}
+
+void
+show_oops(struct tab *t, const char *fmt, ...)
+{
+	va_list			ap;
+	char			*msg;
+
+	if (fmt == NULL)
+		return;
+
+	va_start(ap, fmt);
+	if (vasprintf(&msg, fmt, ap) == -1)
+		errx(1, "moo");
+	va_end(ap);
+
+	gtk_entry_set_text(GTK_ENTRY(t->oops), msg);
+	gtk_widget_hide(t->cmd);
+	gtk_widget_show(t->oops);
+}
 char *
 get_as_string(struct settings *s)
 {
@@ -664,26 +707,6 @@ set_download_dir(struct settings *s, char *val)
 	return (0);
 }
 
-char *
-get_runtime_dir(struct settings *s)
-{
-	if (runtime_settings[0] == '\0')
-		return (0);
-	return (g_strdup(runtime_settings));
-}
-
-int
-set_runtime_dir(struct settings *s, char *val)
-{
-	if (val[0] == '~')
-		snprintf(runtime_settings, sizeof runtime_settings, "%s/%s",
-		    pwd->pw_dir, &val[1]);
-	else
-		strlcpy(runtime_settings, val, sizeof runtime_settings);
-
-	return (0);
-}
-
 /*
  * Session IDs.
  * We use these to prevent people putting xxxt:// URLs on
@@ -762,10 +785,11 @@ generate_xtp_session_key(char **key)
  * return 1 if OK
  */
 int
-validate_xtp_session_key(char *trusted, char *untrusted)
+validate_xtp_session_key(struct tab *t, char *trusted, char *untrusted)
 {
 	if (strcmp(trusted, untrusted) != 0) {
-		warn("%s: xtp session key mismatch possible spoof", __func__);
+		show_oops(t, "%s: xtp session key mismatch possible spoof",
+		    __func__);
 		return (0);
 	}
 
@@ -1234,7 +1258,8 @@ config_parse(char *filename, int runtime)
 		return;
 
 	if (runtime && runtime_settings[0] != '\0') {
-		snprintf(file, sizeof file, "%s/%s", work_dir, runtime_settings);
+		snprintf(file, sizeof file, "%s/%s",
+		    work_dir, runtime_settings);
 		if (stat(file, &sb)) {
 			warnx("runtime file doesn't exist, creating it");
 			if ((f = fopen(file, "w")) == NULL)
@@ -1485,7 +1510,7 @@ restore_global_history(void)
 }
 
 int
-save_global_history_to_disk(void)
+save_global_history_to_disk(struct tab *t)
 {
 	char			file[PATH_MAX];
 	FILE			*f;
@@ -1495,7 +1520,8 @@ save_global_history_to_disk(void)
 	    pwd->pw_dir, XT_DIR, XT_HISTORY_FILE);
 
 	if ((f = fopen(file, "w")) == NULL) {
-		warnx("%s: fopen", __func__);
+		show_oops(t, "%s: global history file: %s",
+		    __func__, strerror(errno));
 		return (1);
 	}
 
@@ -1513,7 +1539,7 @@ int
 quit(struct tab *t, struct karg *args)
 {
 	if (save_global_history)
-		save_global_history_to_disk();
+		save_global_history_to_disk(t);
 
 	gtk_main_quit();
 
@@ -1581,7 +1607,7 @@ save_tabs(struct tab *t, struct karg *a)
 	    pwd->pw_dir, XT_DIR, a->s);
 
 	if ((f = fopen(file, "w")) == NULL) {
-		warn("save_tabs");
+		show_oops(t, "Can't open save_tabs file: %s", strerror(errno));
 		return (1);
 	}
 
@@ -1778,11 +1804,7 @@ toggle_js(struct tab *t, struct karg *args)
 	uri = (char *)webkit_web_frame_get_uri(frame);
 	dom = find_domain(uri, 1);
 	if (uri == NULL || dom == NULL) {
-		webkit_web_view_load_string(t->wv,
-		    "<html><body>Can't toggle domain in JavaScript white list</body></html>",
-		    NULL,
-		    NULL,
-		    NULL);
+		show_oops(t, "Can't toggle domain in JavaScript white list");
 		goto done;
 	}
 
@@ -1871,7 +1893,9 @@ stats(struct tab *t, struct karg *args)
 			fclose(r_cookie_f);
 			snprintf(line, sizeof line,
 			    "<br>Cookies blocked(*) total: %llu", line_count);
-		}
+		} else
+			show_oops(t, "Can't open blocked cookies file: %s",
+			    strerror(errno));
 	}
 
 	stats = g_strdup_printf(XT_DOCTYPE
@@ -1889,7 +1913,7 @@ stats(struct tab *t, struct karg *args)
 	   blocked_cookies,
 	   line);
 
-	webkit_web_view_load_string(t->wv, stats, NULL, NULL, "");
+	load_webkit_string(t, stats);
 	g_free(stats);
 
 	return (0);
@@ -1924,7 +1948,7 @@ about(struct tab *t, struct karg *args)
 	    version
 	    );
 
-	webkit_web_view_load_string(t->wv, about, NULL, NULL, "");
+	load_webkit_string(t, about);
 	g_free(about);
 
 	return (0);
@@ -1953,7 +1977,7 @@ help(struct tab *t, struct karg *args)
 	    "</html>"
 	    ;
 
-	webkit_web_view_load_string(t->wv, help, NULL, NULL, "");
+	load_webkit_string(t, help);
 
 	return (0);
 }
@@ -2003,7 +2027,7 @@ xtp_page_fl(struct tab *t, struct karg *args)
 	snprintf(file, sizeof file, "%s/%s/%s",
 	    pwd->pw_dir, XT_DIR, XT_FAVS_FILE);
 	if ((f = fopen(file, "r")) == NULL) {
-		warn("favorites");
+		show_oops(t, "Can't open favorites file: %s", strerror(errno));
 		return (1);
 	}
 
@@ -2077,7 +2101,7 @@ xtp_page_fl(struct tab *t, struct karg *args)
 	if (!failed) {
 		html = g_strdup_printf("%s%s</table></div></html>",
 		    header, body);
-		webkit_web_view_load_string(t->wv, html, NULL, NULL, "");
+		load_webkit_string(t, html);
 	}
 
 	update_favorite_tabs(t);
@@ -2138,7 +2162,7 @@ show_certs(struct tab *t, gnutls_x509_crt_t *certs,
 	g_free(header);
 	g_free(body);
 	g_free(footer);
-	webkit_web_view_load_string(t->wv, tmp, NULL, NULL, NULL);
+	load_webkit_string(t, tmp);
 	g_free(tmp);
 }
 
@@ -2154,16 +2178,18 @@ ca_cmd(struct tab *t, struct karg *args)
 
 	/* yeah yeah stat race */
 	if (stat(ssl_ca_file, &sb)) {
-		warn("no CA file: %s", ssl_ca_file);
+		show_oops(t, "no CA file: %s", ssl_ca_file);
 		goto done;
 	}
 
-	if ((f = fopen(ssl_ca_file, "r")) == NULL)
+	if ((f = fopen(ssl_ca_file, "r")) == NULL) {
+		show_oops(t, "Can't open CA file: %s", strerror(errno));
 		return (1);
+	}
 
 	certs_buf = g_malloc(sb.st_size + 1);
 	if (fread(certs_buf, 1, sb.st_size, f) != sb.st_size) {
-		warn("certs");
+		show_oops(t, "Can't read CA file: %s", strerror(errno));
 		goto done;
 	}
 	certs_buf[sb.st_size] = '\0';
@@ -2180,7 +2206,7 @@ ca_cmd(struct tab *t, struct karg *args)
 	c = g_malloc(sizeof(gnutls_x509_crt_t) * certs);
 	certs_read = gnutls_x509_crt_list_import(c, &certs, &dt, GNUTLS_X509_FMT_PEM, 0);
 	if (certs_read <= 0) {
-		warnx("couldn't read certs");
+		show_oops(t, "No cert(s) available");
 		goto done;
 	}
 	show_certs(t, c, certs_read, "Certificate Authority Certificates");
@@ -2259,7 +2285,8 @@ stop_tls(gnutls_session_t gsession, gnutls_certificate_credentials_t xcred)
 }
 
 int
-start_tls(int s, gnutls_session_t *gs, gnutls_certificate_credentials_t *xc)
+start_tls(struct tab *t, int s, gnutls_session_t *gs,
+    gnutls_certificate_credentials_t *xc)
 {
 	gnutls_certificate_credentials_t xcred;
 	gnutls_session_t	gsession;
@@ -2268,8 +2295,8 @@ start_tls(int s, gnutls_session_t *gs, gnutls_certificate_credentials_t *xc)
 	if (gs == NULL || xc == NULL)
 		goto done;
 
-	bzero(&xcred, sizeof xcred);
-	bzero(&gsession, sizeof gsession);
+	*gs = NULL;
+	*xc = NULL;
 
 	gnutls_certificate_allocate_credentials(&xcred);
 	gnutls_certificate_set_x509_trust_file(xcred, ssl_ca_file,
@@ -2279,16 +2306,18 @@ start_tls(int s, gnutls_session_t *gs, gnutls_certificate_credentials_t *xc)
 	gnutls_credentials_set(gsession, GNUTLS_CRD_CERTIFICATE, xcred);
 	gnutls_transport_set_ptr(gsession, (gnutls_transport_ptr_t)(long)s);
 	if ((rv = gnutls_handshake(gsession)) < 0) {
-		warnx("gnutls_handshake failed %d", rv);
-		gnutls_certificate_free_credentials(xcred);
+		show_oops(t, "gnutls_handshake failed %d fatal %d %s",
+		    rv,
+		    gnutls_error_is_fatal(rv),
+		    gnutls_strerror_name(rv));
+		stop_tls(gsession, xcred);
 		goto done;
 	}
 
 	gnutls_credentials_type_t cred;
 	cred = gnutls_auth_get_type(gsession);
 	if (cred != GNUTLS_CRD_CERTIFICATE) {
-		gnutls_deinit(gsession);
-		gnutls_certificate_free_credentials(xcred);
+		stop_tls(gsession, xcred);
 		goto done;
 	}
 
@@ -2358,7 +2387,8 @@ save_certs(struct tab *t, gnutls_x509_crt_t *certs,
 
 	snprintf(file, sizeof file, "%s/%s", certs_dir, domain);
 	if ((f = fopen(file, "w")) == NULL) {
-		warn("save_certs");
+		show_oops(t, "Can't create cert file %s %s",
+		    file, strerror(errno));
 		return;
 	}
 
@@ -2366,11 +2396,11 @@ save_certs(struct tab *t, gnutls_x509_crt_t *certs,
 		cert_buf_sz = sizeof cert_buf;
 		if (gnutls_x509_crt_export(certs[i], GNUTLS_X509_FMT_PEM,
 		    cert_buf, &cert_buf_sz)) {
-			warnx("gnutls_x509_crt_export");
+			show_oops(t, "gnutls_x509_crt_export failed");
 			goto done;
 		}
 		if (fwrite(cert_buf, cert_buf_sz, 1, f) != 1) {
-			warn("fwrite certs");
+			show_oops(t, "Can't write certs: %s", strerror(errno));
 			goto done;
 		}
 	}
@@ -2405,14 +2435,14 @@ load_compare_cert(struct tab *t, struct karg *args)
 		return (1);
 
 	/* go ssl/tls */
-	if (start_tls(s, &gsession, &xcred)) {
-		warnx("start_tls");
+	if (start_tls(t, s, &gsession, &xcred)) {
+		show_oops(t, "Start TLS failed");
 		goto done;
 	}
 
 	/* get certs */
 	if (get_connection_certs(gsession, &certs, &cert_count)) {
-		warnx("get_connection_certs");
+		show_oops(t, "Can't get connection certificates");
 		goto done;
 	}
 
@@ -2424,16 +2454,13 @@ load_compare_cert(struct tab *t, struct karg *args)
 		cert_buf_sz = sizeof cert_buf;
 		if (gnutls_x509_crt_export(certs[i], GNUTLS_X509_FMT_PEM,
 		    cert_buf, &cert_buf_sz)) {
-			warnx("gnutls_x509_crt_export");
 			goto freeit;
 		}
 		if (fread(r_cert_buf, cert_buf_sz, 1, f) != 1) {
-			warn("fread certs");
 			rv = -1; /* critical */
 			goto freeit;
 		}
 		if (bcmp(r_cert_buf, cert_buf, sizeof cert_buf_sz)) {
-			warnx("invalid cert");
 			rv = -1; /* critical */
 			goto freeit;
 		}
@@ -2474,18 +2501,23 @@ cert_cmd(struct tab *t, struct karg *args)
 
 	frame = webkit_web_view_get_main_frame(t->wv);
 	uri = (char *)webkit_web_frame_get_uri(frame);
-	if ((s = connect_socket_from_uri(uri, domain, sizeof domain)) == -1)
+	if (uri && strlen(uri) == 0) {
+		show_oops(t, "Invalid URI");
+	}
+	if ((s = connect_socket_from_uri(uri, domain, sizeof domain)) == -1) {
+		show_oops(t, "Invalid certidicate URI: %s", uri);
 		return (1);
+	}
 
 	/* go ssl/tls */
-	if (start_tls(s, &gsession, &xcred)) {
-		warnx("start_tls");
+	if (start_tls(t, s, &gsession, &xcred)) {
+		show_oops(t, "Start TLS failed");
 		goto done;
 	}
 
 	/* get certs */
 	if (get_connection_certs(gsession, &certs, &cert_count)) {
-		warnx("get_connection_certs");
+		show_oops(t, "get_connection_certs failed");
 		goto done;
 	}
 
@@ -2493,6 +2525,8 @@ cert_cmd(struct tab *t, struct karg *args)
 		show_certs(t, certs, cert_count, "Certificate Chain");
 	else if (!strcmp(action, "save"))
 		save_certs(t, certs, cert_count, domain);
+	else
+		show_oops(t, "Invalid command: %s", action);
 
 	free_connection_certs(certs, cert_count);
 done:
@@ -2537,6 +2571,9 @@ wl_show(struct tab *t, char *args, char *title, struct domain_list *wl)
 	char			*tmp, *header, *body, *footer;
 	int			p_js = 0, s_js = 0;
 
+	/* we set this to indicate we want to manually do navaction */
+	t->item = webkit_web_back_forward_list_get_current_item(t->bfl);
+
 	if (g_str_has_prefix(args, "show a") ||
 	    !strcmp(args, "show")) {
 		/* show all */
@@ -2561,7 +2598,7 @@ wl_show(struct tab *t, char *args, char *title, struct domain_list *wl)
 		tmp = body;
 		body = g_strdup_printf("%s<h2>Persistent</h2>", body);
 		g_free(tmp);
-		RB_FOREACH_REVERSE(d, domain_list, wl) {
+		RB_FOREACH(d, domain_list, wl) {
 			if (d->handy == 0)
 				continue;
 			tmp = body;
@@ -2575,7 +2612,7 @@ wl_show(struct tab *t, char *args, char *title, struct domain_list *wl)
 		tmp = body;
 		body = g_strdup_printf("%s<h2>Session</h2>", body);
 		g_free(tmp);
-		RB_FOREACH_REVERSE(d, domain_list, wl) {
+		RB_FOREACH(d, domain_list, wl) {
 			if (d->handy == 1)
 				continue;
 			tmp = body;
@@ -2588,7 +2625,7 @@ wl_show(struct tab *t, char *args, char *title, struct domain_list *wl)
 	g_free(header);
 	g_free(body);
 	g_free(footer);
-	webkit_web_view_load_string(t->wv, tmp, NULL, NULL, NULL);
+	load_webkit_string(t, tmp);
 	g_free(tmp);
 	return (0);
 }
@@ -2622,20 +2659,15 @@ wl_save(struct tab *t, struct karg *args, int js)
 	uri = (char *)webkit_web_frame_get_uri(frame);
 	dom = find_domain(uri, 1);
 	if (uri == NULL || dom == NULL) {
-		/* XXX this needs to be generalized */
-		webkit_web_view_load_string(t->wv,
-		    "<html><body>Can't add domain to JavaScript white list</body></html>",
-		    NULL,
-		    NULL,
-		    NULL);
+		show_oops(t, "Can't add domain to %s white list",
+		  js ? "JavaScript" : "cookie");
 		goto done;
 	}
 
 	if (g_str_has_prefix(args->s, "save d")) {
 		/* save domain */
 		if ((dom_save = get_toplevel_domain(dom)) == NULL) {
-			/* XXX this needs use feedback */
-			warnx("bad bad bad");
+			show_oops(t, "invalid domain: %s", dom);
 			goto done;
 		}
 		flags = XT_WL_TOPLEVEL;
@@ -2645,8 +2677,7 @@ wl_save(struct tab *t, struct karg *args, int js)
 		dom_save = dom;
 		flags = XT_WL_FQDN;
 	} else {
-		/* XXX this needs use feedback */
-		warnx("invalid command");
+		show_oops(t, "invalid command: %s", args->s);
 		goto done;
 	}
 
@@ -2725,7 +2756,9 @@ cookie_cmd(struct tab *t, struct karg *args)
 			a.i |= XT_WL_FQDN;
 		toggle_cwl(t, &a);
 	} else if (g_str_has_prefix(cmd, "delete")) {
-	}
+		show_oops(t, "'cookie delete' currently unimplemented");
+	} else
+		show_oops(t, "unknown cookie command: %s", cmd);
 
 	return (0);
 }
@@ -2741,7 +2774,6 @@ js_cmd(struct tab *t, struct karg *args)
 	else
 		cmd = "show all";
 
-
 	if (g_str_has_prefix(cmd, "show")) {
 		wl_show(t, cmd, "JavaScript White List", &js_wl);
 	} else if (g_str_has_prefix(cmd, "save")) {
@@ -2755,7 +2787,9 @@ js_cmd(struct tab *t, struct karg *args)
 			a.i |= XT_WL_FQDN;
 		toggle_js(t, &a);
 	} else if (g_str_has_prefix(cmd, "delete")) {
-	}
+		show_oops(t, "'js delete' currently unimplemented");
+	} else
+		show_oops(t, "unknown js command: %s", cmd);
 
 	return (0);
 }
@@ -2775,14 +2809,14 @@ add_favorite(struct tab *t, struct karg *args)
 
 	/* don't allow adding of xtp pages to favorites */
 	if (t->xtp_meaning != XT_XTP_TAB_MEANING_NORMAL) {
-		warn("%s: can't add xtp pages to favorites", __func__);
+		show_oops(t, "%s: can't add xtp pages to favorites", __func__);
 		return (1);
 	}
 
 	snprintf(file, sizeof file, "%s/%s/%s",
 	    pwd->pw_dir, XT_DIR, XT_FAVS_FILE);
 	if ((f = fopen(file, "r+")) == NULL) {
-		warn("favorites");
+		show_oops(t, "Can't open favorites file: %s", strerror(errno));
 		return (1);
 	}
 
@@ -2793,11 +2827,7 @@ add_favorite(struct tab *t, struct karg *args)
 		title = uri;
 
 	if (title == NULL || uri == NULL) {
-		webkit_web_view_load_string(t->wv,
-		    "<html><body>can't add page to favorites</body></html>",
-		    NULL,
-		    NULL,
-		    NULL);
+		show_oops(t, "can't add page to favorites");
 		goto done;
 	}
 
@@ -2825,8 +2855,22 @@ done:
 int
 navaction(struct tab *t, struct karg *args)
 {
+	WebKitWebHistoryItem	*item;
+
 	DNPRINTF(XT_D_NAV, "navaction: tab %d opcode %d\n",
 	    t->tab_id, args->i);
+
+	if (t->item) {
+		if (args->i == XT_NAV_BACK)
+			item = webkit_web_back_forward_list_get_current_item(t->bfl);
+		else
+			item = webkit_web_back_forward_list_get_forward_item(t->bfl);
+		if (item == NULL)
+			return (XT_CB_PASSTHROUGH);;
+		webkit_web_view_load_uri(t->wv, webkit_web_history_item_get_uri(item));
+		t->item = NULL;
+		return (XT_CB_PASSTHROUGH);
+	}
 
 	switch (args->i) {
 	case XT_NAV_BACK:
@@ -3125,7 +3169,7 @@ command(struct tab *t, struct karg *args)
 		}
 		break;
 	default:
-		warnx("command: invalid command %c\n", args->i);
+		show_oops(t, "command: invalid opcode %d", args->i);
 		return (XT_CB_PASSTHROUGH);
 	}
 
@@ -3134,7 +3178,7 @@ command(struct tab *t, struct karg *args)
 	gtk_entry_set_text(GTK_ENTRY(t->cmd), s);
 	gdk_color_parse("white", &color);
 	gtk_widget_modify_base(t->cmd, GTK_STATE_NORMAL, &color);
-	gtk_widget_show(t->cmd);
+	show_cmd(t);
 	gtk_widget_grab_focus(GTK_WIDGET(t->cmd));
 	gtk_editable_set_position(GTK_EDITABLE(t->cmd), -1);
 
@@ -3149,7 +3193,7 @@ command(struct tab *t, struct karg *args)
  * appended. Old string is freed.
  */
 char *
-xtp_page_dl_row(char *html, struct download *dl)
+xtp_page_dl_row(struct tab *t, char *html, struct download *dl)
 {
 
 	WebKitDownloadStatus	stat;
@@ -3208,7 +3252,7 @@ xtp_page_dl_row(char *html, struct download *dl)
 		status_html = g_strdup_printf("Starting");
 		break;
 	default:
-		warn("%s: unknown download status", __func__);
+		show_oops(t, "%s: unknown download status", __func__);
 	};
 
 	new_html = g_strdup_printf(
@@ -3392,7 +3436,7 @@ xtp_page_cl(struct tab *t, struct karg *args)
 	g_free(body);
 	g_free(footer);
 
-	webkit_web_view_load_string(t->wv, page, "text/html", "UTF-8", "");
+	load_webkit_string(t, page);
 	update_cookie_tabs(t);
 
 	g_free(page);
@@ -3471,7 +3515,7 @@ xtp_page_hl(struct tab *t, struct karg *args)
 	g_free(body);
 	g_free(footer);
 
-	webkit_web_view_load_string(t->wv, page, "text/html", "UTF-8", "");
+	load_webkit_string(t, page);
 	g_free(page);
 
 	return (0);
@@ -3532,7 +3576,7 @@ xtp_page_dl(struct tab *t, struct karg *args)
 	    XT_XTP_STR, XT_XTP_DL, dl_session_key, XT_XTP_DL_LIST);
 
 	RB_FOREACH_REVERSE(dl, download_list, &downloads) {
-		body = xtp_page_dl_row(body, dl);
+		body = xtp_page_dl_row(t, body, dl);
 		n_dl++;
 	}
 
@@ -3563,7 +3607,7 @@ xtp_page_dl(struct tab *t, struct karg *args)
 	g_free(body);
 	g_free(footer);
 
-	webkit_web_view_load_string(t->wv, page, "text/html", "UTF-8", "");
+	load_webkit_string(t, page);
 	g_free(page);
 
 	return (0);
@@ -3616,10 +3660,8 @@ print_setting(struct settings *s, char *val, void *cb_args)
 	char			*tmp, *color;
 	struct settings_args	*sa = cb_args;
 
-	if (sa == NULL) {
-		warnx("*** %s", s->name);
+	if (sa == NULL)
 		return;
-	}
 
 	if (s->flags & XT_SF_RUNTIME)
 		color = "#22cc22";
@@ -3682,9 +3724,9 @@ set(struct tab *t, struct karg *args)
 		g_free(body);
 		g_free(footer);
 
-		webkit_web_view_load_string(t->wv, page, "text/html", "UTF-8", "");
+		load_webkit_string(t, page);
 	} else {
-		fprintf(stderr, "pars %s\n", pars);
+		show_oops(t, "Invalid command: %s", pars);
 	}
 
 	return (XT_CB_PASSTHROUGH);
@@ -3895,6 +3937,14 @@ struct cmd {
 };
 
 gboolean
+wv_button_cb(GtkWidget *btn, GdkEventButton *e, struct tab *t)
+{
+	hide_oops(t);
+
+	return (FALSE);
+}
+
+gboolean
 tab_close_cb(GtkWidget *btn, GdkEventButton *e, struct tab *t)
 {
 	DNPRINTF(XT_D_TAB, "tab_close_cb: tab %d\n", t->tab_id);
@@ -3922,7 +3972,7 @@ xtp_handle_dl(struct tab *t, uint8_t cmd, int id)
 		d = RB_FIND(download_list, &downloads, &find);
 
 		if (d == NULL) {
-			warn("%s: no such download", __func__);
+			show_oops(t, "%s: no such download", __func__);
 			return;
 		}
 	}
@@ -3941,7 +3991,7 @@ xtp_handle_dl(struct tab *t, uint8_t cmd, int id)
 		/* Nothing */
 		break;
 	default:
-		warn("%s: unknown command", __func__);
+		show_oops(t, "%s: unknown command", __func__);
 		break;
 	};
 	xtp_page_dl(t, NULL);
@@ -3976,7 +4026,7 @@ xtp_handle_hl(struct tab *t, uint8_t cmd, int id)
 		/* Nothing - just xtp_page_hl() below */
 		break;
 	default:
-		warn("%s: unknown command", __func__);
+		show_oops(t, "%s: unknown command", __func__);
 		break;
 	};
 
@@ -3985,7 +4035,7 @@ xtp_handle_hl(struct tab *t, uint8_t cmd, int id)
 
 /* remove a favorite */
 void
-remove_favorite(int index)
+remove_favorite(struct tab *t, int index)
 {
 	char			file[PATH_MAX], *title, *uri;
 	char			*new_favs, *tmp;
@@ -3998,7 +4048,8 @@ remove_favorite(int index)
 	    pwd->pw_dir, XT_DIR, XT_FAVS_FILE);
 
 	if ((f = fopen(file, "r")) == NULL) {
-		warn("%s: can't open favorites", __func__);
+		show_oops(t, "%s: can't open favorites: %s",
+		    __func__, strerror(errno));
 		return;
 	}
 
@@ -4009,6 +4060,7 @@ remove_favorite(int index)
 		if ((title = fparseln(f, &len, &lineno, NULL, 0)) == NULL)
 			if (feof(f) || ferror(f))
 				break;
+		/* XXX THIS IS NOT THE RIGHT HEURISTIC */
 		if (len == 0) {
 			free(title);
 			title = NULL;
@@ -4017,7 +4069,8 @@ remove_favorite(int index)
 
 		if ((uri = fparseln(f, &len, &lineno, NULL, 0)) == NULL) {
 			if (feof(f) || ferror(f)) {
-				warn("%s: can't parse favorites", __func__);
+				show_oops(t, "%s: can't parse favorites %s",
+				    __func__, strerror(errno));
 				goto clean;
 			}
 		}
@@ -4040,7 +4093,8 @@ remove_favorite(int index)
 
 	/* write back new favorites file */
 	if ((f = fopen(file, "w")) == NULL) {
-		warn("%s: can't open favorites", __func__);
+		show_oops(t, "%s: can't open favorites: %s",
+		    __func__, strerror(errno));
 		goto clean;
 	}
 
@@ -4064,10 +4118,10 @@ xtp_handle_fl(struct tab *t, uint8_t cmd, int arg)
 		/* nothing, just the below call to xtp_page_fl() */
 		break;
 	case XT_XTP_FL_REMOVE:
-		remove_favorite(arg);
+		remove_favorite(t, arg);
 		break;
 	default:
-		warn("%s: invalid favorites command", __func__);
+		show_oops(t, "%s: invalid favorites command", __func__);
 		break;
 	};
 
@@ -4085,7 +4139,7 @@ xtp_handle_cl(struct tab *t, uint8_t cmd, int arg)
 		remove_cookie(arg);
 		break;
 	default:
-		warn("%s: unknown cookie xtp command", __func__);
+		show_oops(t, "%s: unknown cookie xtp command", __func__);
 		break;
 	};
 
@@ -4161,12 +4215,12 @@ parse_xtp_url(struct tab *t, const char *url)
 
 	/* did we find one atall? */
 	if (dsp_match == NULL) {
-		warn("%s: no matching xtp despatch found", __func__);
+		show_oops(t, "%s: no matching xtp despatch found", __func__);
 		goto clean;
 	}
 
 	/* check session key and call despatch function */
-	if (validate_xtp_session_key(*(dsp_match->session_key), tokens[1])) {
+	if (validate_xtp_session_key(t, *(dsp_match->session_key), tokens[1])) {
 		dsp_match->handle_func(t, atoi(tokens[2]), atoi(tokens[3]));
 	}
 
@@ -4222,7 +4276,7 @@ activate_search_entry_cb(GtkWidget* entry, struct tab *t)
 		errx(1, "activate_search_entry_cb");
 
 	if (search_string == NULL) {
-		warnx("no search_string");
+		show_oops(t, "no search_string");
 		return;
 	}
 
@@ -4417,8 +4471,11 @@ notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 		break;
 	}
 
-	gtk_widget_set_sensitive(GTK_WIDGET(t->backward),
-	    webkit_web_view_can_go_back(wview));
+	if (t->item)
+		gtk_widget_set_sensitive(GTK_WIDGET(t->backward), TRUE);
+	else
+		gtk_widget_set_sensitive(GTK_WIDGET(t->backward),
+		    webkit_web_view_can_go_back(wview));
 
 	gtk_widget_set_sensitive(GTK_WIDGET(t->forward),
 	    webkit_web_view_can_go_forward(wview));
@@ -4596,7 +4653,7 @@ webview_download_cb(WebKitWebView *wv, WebKitDownload *wk_download, struct tab *
 
 	if (webkit_download_get_status(wk_download) ==
 	    WEBKIT_DOWNLOAD_STATUS_ERROR) {
-		warn("%s: download failed to start", __func__);
+		show_oops(t, "%s: download failed to start", __func__);
 		ret = FALSE;
 		gtk_label_set_text(GTK_LABEL(t->label), "Download Failed");
 	} else {
@@ -4645,7 +4702,7 @@ webview_hover_cb(WebKitWebView *wv, gchar *title, gchar *uri, struct tab *t)
 }
 
 int
-webview_keypress_cb(GtkWidget *w, GdkEventKey *e, struct tab *t)
+wv_keypress_after_cb(GtkWidget *w, GdkEventKey *e, struct tab *t)
 {
 	int			i;
 	char			s[2], buf[128];
@@ -4655,9 +4712,9 @@ webview_keypress_cb(GtkWidget *w, GdkEventKey *e, struct tab *t)
 	/* don't use w directly; use t->whatever instead */
 
 	if (t == NULL)
-		errx(1, "webview_keypress_cb");
+		errx(1, "wv_keypress_after_cb");
 
-	DNPRINTF(XT_D_KEY, "webview_keypress_cb: keyval 0x%x mask 0x%x t %p\n",
+	DNPRINTF(XT_D_KEY, "wv_keypress_after_cb: keyval 0x%x mask 0x%x t %p\n",
 	    e->keyval, e->state, t);
 
 	if (t->hints_on) {
@@ -4723,12 +4780,12 @@ webview_keypress_cb(GtkWidget *w, GdkEventKey *e, struct tab *t)
 		    ((e->keyval >= GDK_0 && e->keyval <= GDK_9) || (e->keyval >= GDK_KP_0 && e->keyval <= GDK_KP_9))) {
 			snprintf(s, sizeof s, "%c", e->keyval);
 			strlcat(t->hint_num, s, sizeof t->hint_num);
-			DNPRINTF(XT_D_JS, "webview_keypress_cb: numerical %s\n",
+			DNPRINTF(XT_D_JS, "wv_keypress_after_cb: numerical %s\n",
 			    t->hint_num);
 num:
 			link = strtonum(t->hint_num, 1, 1000, &errstr);
 			if (errstr) {
-				DNPRINTF(XT_D_JS, "webview_keypress_cb: invalid link number\n");
+				DNPRINTF(XT_D_JS, "wv_keypress_after_cb: invalid link number\n");
 				disable_hints(t);
 			} else {
 				snprintf(buf, sizeof buf, "vimprobable_update_hints(%s)",
@@ -4750,7 +4807,7 @@ num:
 		    ((e->keyval >= GDK_KP_0 && e->keyval <= GDK_KP_9) && (t->hint_mode != XT_HINT_NUMERICAL))))) {
 			snprintf(s, sizeof s, "%c", e->keyval);
 			strlcat(t->hint_buf, s, sizeof t->hint_buf);
-			DNPRINTF(XT_D_JS, "webview_keypress_cb: alphanumerical %s\n",
+			DNPRINTF(XT_D_JS, "wv_keypress_after_cb: alphanumerical %s\n",
 			    t->hint_buf);
 anum:
 			snprintf(buf, sizeof buf, "vimprobable_cleanup()");
@@ -4775,6 +4832,15 @@ anum:
 			keys[i].func(t, &keys[i].arg);
 			return (XT_CB_HANDLED);
 		}
+
+
+	return (XT_CB_PASSTHROUGH);
+}
+
+int
+wv_keypress_cb(GtkEntry *w, GdkEventKey *e, struct tab *t)
+{
+	hide_oops(t);
 
 	return (XT_CB_PASSTHROUGH);
 }
@@ -4865,6 +4931,8 @@ entry_key_cb(GtkEntry *w, GdkEventKey *e, struct tab *t)
 	DNPRINTF(XT_D_CMD, "entry_key_cb: keyval 0x%x mask 0x%x t %p\n",
 	    e->keyval, e->state, t);
 
+	hide_oops(t);
+
 	if (e->keyval == GDK_Escape)
 		gtk_widget_grab_focus(GTK_WIDGET(t->wv));
 
@@ -4918,7 +4986,7 @@ cmd_keypress_cb(GtkEntry *w, GdkEventKey *e, struct tab *t)
 			break;
 		/* FALLTHROUGH */
 	case GDK_Escape:
-		gtk_widget_hide(t->cmd);
+		hide_cmd(t);
 		gtk_widget_grab_focus(GTK_WIDGET(t->wv));
 
 		/* cancel search */
@@ -4941,8 +5009,9 @@ cmd_focusout_cb(GtkWidget *w, GdkEventFocus *e, struct tab *t)
 	DNPRINTF(XT_D_CMD, "cmd_focusout_cb: tab %d focus_wv %d\n",
 	    t->tab_id, t->focus_wv);
 
-	/* abort command when losing focus */
-	gtk_widget_hide(t->cmd);
+	hide_cmd(t);
+	hide_oops(t);
+
 	if (t->focus_wv)
 		gtk_widget_grab_focus(GTK_WIDGET(t->wv));
 	else
@@ -4997,36 +5066,41 @@ cmd_activate_cb(GtkEntry *entry, struct tab *t)
 			if (!strcmp(s, cmds[i].cmd))
 				goto execute_command;
 		}
-
+	show_oops(t, "Invalid command: %s", s);
 done:
-	gtk_widget_hide(t->cmd);
+	hide_cmd(t);
 	return;
 
 execute_command:
-	gtk_widget_hide(t->cmd);
+	hide_cmd(t);
 	cmds[i].func(t, &cmds[i].arg);
 }
-
 void
 backward_cb(GtkWidget *w, struct tab *t)
 {
+	struct karg		a;
+
 	if (t == NULL)
 		errx(1, "backward_cb");
 
 	DNPRINTF(XT_D_NAV, "backward_cb: tab %d\n", t->tab_id);
 
-	webkit_web_view_go_back(t->wv);
+	a.i = XT_NAV_BACK;
+	navaction(t, &a);
 }
 
 void
 forward_cb(GtkWidget *w, struct tab *t)
 {
+	struct karg		a;
+
 	if (t == NULL)
 		errx(1, "forward_cb");
 
 	DNPRINTF(XT_D_NAV, "forward_cb: tab %d\n", t->tab_id);
 
-	webkit_web_view_go_forward(t->wv);
+	a.i = XT_NAV_FORWARD;
+	navaction(t, &a);
 }
 
 void
@@ -5041,7 +5115,7 @@ stop_cb(GtkWidget *w, struct tab *t)
 
 	frame = webkit_web_view_get_main_frame(t->wv);
 	if (frame == NULL) {
-		warnx("stop_cb: no frame");
+		show_oops(t, "stop_cb: no frame");
 		return;
 	}
 
@@ -5213,10 +5287,9 @@ undo_close_tab_save(struct tab *t)
 	int				m, n;
 	const gchar			*uri;
 	struct undo			*u1, *u2;
-	WebKitWebFrame                  *frame;
-	WebKitWebBackForwardList        *bfl;
-	GList                           *items;
-	WebKitWebHistoryItem            *item;
+	WebKitWebFrame			*frame;
+	GList				*items;
+	WebKitWebHistoryItem		*item;
 
 	frame = webkit_web_view_get_main_frame(t->wv);
 	uri = webkit_web_frame_get_uri(frame);
@@ -5227,14 +5300,14 @@ undo_close_tab_save(struct tab *t)
 	u1 = g_malloc0(sizeof(struct undo));
 	u1->uri = g_strdup(uri);
 
-	bfl = webkit_web_view_get_back_forward_list(t->wv);
+	t->bfl = webkit_web_view_get_back_forward_list(t->wv);
 
-	m = webkit_web_back_forward_list_get_forward_length(bfl);
-	n = webkit_web_back_forward_list_get_back_length(bfl);
+	m = webkit_web_back_forward_list_get_forward_length(t->bfl);
+	n = webkit_web_back_forward_list_get_back_length(t->bfl);
 	u1->back = n;
 
 	/* forward history */
-	items = webkit_web_back_forward_list_get_forward_list_with_limit(bfl, m);
+	items = webkit_web_back_forward_list_get_forward_list_with_limit(t->bfl, m);
 
 	while (items) {
 		item = items->data;
@@ -5245,13 +5318,13 @@ undo_close_tab_save(struct tab *t)
 
 	/* current item */
 	if (m) {
-		item = webkit_web_back_forward_list_get_current_item(bfl);
+		item = webkit_web_back_forward_list_get_current_item(t->bfl);
 		u1->history = g_list_prepend(u1->history,
 		    webkit_web_history_item_copy(item));
 	}
 
 	/* back history */
-	items = webkit_web_back_forward_list_get_back_list_with_limit(bfl, n);
+	items = webkit_web_back_forward_list_get_back_list_with_limit(t->bfl, n);
 
 	while (items) {
 		item = items->data;
@@ -5332,7 +5405,7 @@ create_new_tab(char *title, struct undo *u, int focus)
 	GtkWidget			*b, *bb;
 	WebKitWebHistoryItem		*item;
 	GList				*items;
-	WebKitWebBackForwardList	*bfl;
+	GdkColor			color;
 
 	DNPRINTF(XT_D_TAB, "create_new_tab: title %s focus %d\n", title, focus);
 
@@ -5381,6 +5454,15 @@ create_new_tab(char *title, struct undo *u, int focus)
 	/* browser */
 	t->browser_win = create_browser(t);
 	gtk_box_pack_start(GTK_BOX(t->vbox), t->browser_win, TRUE, TRUE, 0);
+
+	/* oops message for user feedback */
+	t->oops = gtk_entry_new();
+	gtk_entry_set_inner_border(GTK_ENTRY(t->oops), NULL);
+	gtk_entry_set_has_frame(GTK_ENTRY(t->oops), FALSE);
+	gtk_widget_set_can_focus(GTK_WIDGET(t->oops), FALSE);
+	gdk_color_parse("red", &color);
+	gtk_widget_modify_base(t->oops, GTK_STATE_NORMAL, &color);
+	gtk_box_pack_end(GTK_BOX(t->vbox), t->oops, FALSE, FALSE, 0);
 
 	/* command entry */
 	t->cmd = gtk_entry_new();
@@ -5431,8 +5513,14 @@ create_new_tab(char *title, struct undo *u, int focus)
 	    "signal::activate", (GCallback)cmd_activate_cb, t,
 	    (char *)NULL);
 
+	/* reuse wv_button_cb to hide oops */
+	g_object_connect((GObject*)t->oops,
+	    "signal::button_press_event", (GCallback)wv_button_cb, t,
+	    (char *)NULL);
+
 	g_object_connect((GObject*)t->wv,
-	    "signal-after::key-press-event", (GCallback)webview_keypress_cb, t,
+	    "signal::key-press-event", (GCallback)wv_keypress_cb, t,
+	    "signal-after::key-press-event", (GCallback)wv_keypress_after_cb, t,
 	    /* "signal::hovering-over-link", (GCallback)webview_hover_cb, t, */
 	    "signal::download-requested", (GCallback)webview_download_cb, t,
 	    "signal::mime-type-policy-decision-requested", (GCallback)webview_mimetype_cb, t,
@@ -5442,20 +5530,22 @@ create_new_tab(char *title, struct undo *u, int focus)
 	    "signal::event", (GCallback)webview_event_cb, t,
 	    "signal::load-finished", (GCallback)webview_load_finished_cb, t,
 	    "signal::load-progress-changed", (GCallback)webview_progress_changed_cb, t,
+	    "signal::button_press_event", (GCallback)wv_button_cb, t,
 	    (char *)NULL);
 	g_signal_connect(t->wv, "notify::load-status",
 	    G_CALLBACK(notify_load_status_cb), t);
 
 	/* hijack the unused keys as if we were the browser */
 	g_object_connect((GObject*)t->toolbar,
-	    "signal-after::key-press-event", (GCallback)webview_keypress_cb, t,
+	    "signal-after::key-press-event", (GCallback)wv_keypress_after_cb, t,
 	    (char *)NULL);
 
 	g_signal_connect(G_OBJECT(bb), "button_press_event",
 	    G_CALLBACK(tab_close_cb), t);
 
 	/* hide stuff */
-	gtk_widget_hide(t->cmd);
+	hide_cmd(t);
+	hide_oops(t);
 	if (showurl == 0)
 		gtk_widget_hide(t->toolbar);
 
@@ -5470,19 +5560,19 @@ create_new_tab(char *title, struct undo *u, int focus)
 	else
 		gtk_widget_grab_focus(GTK_WIDGET(t->uri_entry));
 
+	t->bfl = webkit_web_view_get_back_forward_list(t->wv);
 	/* restore the tab's history */
 	if (u && u->history) {
-		bfl = webkit_web_view_get_back_forward_list(t->wv);
-
 		items = u->history;
 		while (items) {
 			item = items->data;
-			webkit_web_back_forward_list_add_item(bfl, item);
+			webkit_web_back_forward_list_add_item(t->bfl, item);
 			items = g_list_next(items);
 		}
 
 		item = g_list_nth_data(u->history, u->back);
-		webkit_web_view_go_to_back_forward_item(t->wv, item);
+		if (item)
+			webkit_web_view_go_to_back_forward_item(t->wv, item);
 
 		g_list_free(items);
 		g_list_free(u->history);
@@ -5511,7 +5601,8 @@ notebook_switchpage_cb(GtkNotebook *nb, GtkNotebookPage *nbp, guint pn,
 				uri = XT_NAME;
 			gtk_window_set_title(GTK_WINDOW(main_window), uri);
 
-			gtk_widget_hide(t->cmd);
+			hide_cmd(t);
+			hide_oops(t);
 
 			if (t->focus_wv)
 				gtk_widget_grab_focus(GTK_WIDGET(t->wv));
@@ -6091,6 +6182,7 @@ main(int argc, char *argv[])
 	/* set default string settings */
 	home = g_strdup("http://www.peereboom.us");
 	resource_dir = g_strdup("/usr/local/share/xxxterm/");
+	strlcpy(runtime_settings,"runtime", sizeof runtime_settings);
 
 	/* read config file */
 	if (strlen(conf) == 0)

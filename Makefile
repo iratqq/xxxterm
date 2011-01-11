@@ -1,4 +1,4 @@
-# $xxxterm: Makefile,v 1.12 2011/01/04 15:50:14 marco Exp $
+# $xxxterm: Makefile,v 1.13 2011/01/10 22:19:40 marco Exp $
 
 PREFIX?=/usr/local
 BINDIR=${PREFIX}/bin
@@ -23,7 +23,7 @@ MANDIR= ${PREFIX}/man/cat
 
 CLEANFILES += javascript.h
 
-javascript.h: hinting.js input-focus.js
+${.CURDIR}/javascript.h: hinting.js input-focus.js
 	perl ${.CURDIR}/js-merge-helper.pl ${.CURDIR}/hinting.js \
 	    ${.CURDIR}/input-focus.js >  ${.CURDIR}/javascript.h
 
@@ -35,6 +35,6 @@ beforeinstall:
 	cp ${.CURDIR}/xxxtermicon64.png ${PREFIX}/share/xxxterm
 	cp ${.CURDIR}/xxxtermicon128.png ${PREFIX}/share/xxxterm
 
-${PROG} ${OBJS} beforedepend: javascript.h
+${PROG} ${OBJS} beforedepend: ${.CURDIR}/javascript.h
 
 .include <bsd.prog.mk>

@@ -1,8 +1,9 @@
-/* $xxxterm: xxxterm.c,v 1.239 2011/01/11 03:51:36 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.271 2011/01/14 21:23:52 marco Exp $ */
 /*
  * Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2011 Stevan Andjelkovic <stevan@student.chalmers.se>
  * Copyright (c) 2010 Edd Barrett <vext01@gmail.com>
+ * Copyright (c) 2011 Todd T. Fries <todd@fries.net>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -21,11 +22,9 @@
  * TODO:
  *	inverse color browsing
  *	favs
- *		- add favicon
  *		- store in sqlite
  *	multi letter commands
  *	pre and post counts for commands
- *	fav icon
  *	autocompletion on various inputs
  *	create privacy browsing
  *		- encrypted local data
@@ -89,7 +88,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.239 2011/01/11 03:51:36 marco Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.271 2011/01/14 21:23:52 marco Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -169,6 +168,12 @@ struct tab {
 	WebKitWebHistoryItem	*item;
 	WebKitWebBackForwardList	*bfl;
 
+	/* favicon */
+	WebKitNetworkRequest	*icon_request;
+	WebKitDownload		*icon_download;
+	GdkPixbuf		*icon_pixbuf;
+	gchar			*icon_dest_uri;
+
 	/* adjustments for browser */
 	GtkScrollbar		*sb_h;
 	GtkScrollbar		*sb_v;
@@ -243,13 +248,16 @@ struct karg {
 /* defines */
 #define XT_NAME			("XXXTerm")
 #define XT_DIR			(".xxxterm")
+#define XT_CACHE_DIR		("cache")
 #define XT_CERT_DIR		("certs/")
+#define XT_SESSIONS_DIR		("sessions/")
 #define XT_CONF_FILE		("xxxterm.conf")
 #define XT_FAVS_FILE		("favorites")
-#define XT_SAVED_TABS_FILE	("saved_tabs")
+#define XT_SAVED_TABS_FILE	("main_session")
 #define XT_RESTART_TABS_FILE	("restart_tabs")
 #define XT_SOCKET_FILE		("socket")
 #define XT_HISTORY_FILE		("history")
+#define XT_SAVE_SESSION_ID	("SESSION_NAME=")
 #define XT_CB_HANDLED		(TRUE)
 #define XT_CB_PASSTHROUGH	(FALSE)
 #define XT_DOCTYPE		"<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.0 Transitional//EN' 'http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd'>"
@@ -339,6 +347,8 @@ struct karg {
 #define XT_TAB_DELQUIT		(3)
 #define XT_TAB_OPEN		(4)
 #define XT_TAB_UNDO_CLOSE	(5)
+#define XT_TAB_SHOW		(6)
+#define XT_TAB_HIDE		(7)
 
 #define XT_NAV_INVALID		(0)
 #define XT_NAV_BACK		(1)
@@ -359,6 +369,9 @@ struct karg {
 
 #define XT_FONT_SET		(0)
 
+#define XT_URL_SHOW		(1)
+#define XT_URL_HIDE		(2)
+
 #define XT_WL_TOGGLE		(1<<0)
 #define XT_WL_ENABLE		(1<<1)
 #define XT_WL_DISABLE		(1<<2)
@@ -369,6 +382,9 @@ struct karg {
 #define XT_CMD_OPEN_CURRENT	(1)
 #define XT_CMD_TABNEW		(2)
 #define XT_CMD_TABNEW_CURRENT	(3)
+
+#define XT_SES_DONOTHING	(0)
+#define XT_SES_CLOSETABS	(1)
 
 /* mime types */
 struct mime_type {
@@ -388,8 +404,8 @@ struct alias {
 TAILQ_HEAD(alias_list, alias);
 
 /* settings that require restart */
-int		showtabs = 1;	/* show tabs on notebook */
-int		showurl = 1;	/* show url toolbar on notebook */
+int		show_tabs = 1;	/* show tabs on notebook */
+int		show_url = 1;	/* show url toolbar on notebook */
 int		tabless = 0;	/* allow only 1 tab */
 int		enable_socket = 0;
 int		single_instance = 0; /* only allow one xxxterm to run */
@@ -429,6 +445,7 @@ int		allow_volatile_cookies = 0;
 int		save_global_history = 0; /* save global history to disk */
 char		*user_agent = NULL;
 int		save_rejected_cookies = 0;
+time_t		session_autosave = 0;
 
 struct settings;
 int		set_download_dir(struct settings *, char *);
@@ -532,10 +549,13 @@ struct settings {
 	{ "refresh_interval", XT_S_INT, 0 , &refresh_interval, NULL, NULL },
 	{ "resource_dir", XT_S_STR, 0 , NULL, &resource_dir, NULL },
 	{ "search_string", XT_S_STR, 0 , NULL, &search_string, NULL },
-	{ "session_timeout", XT_S_INT, 0 , &session_timeout, NULL, NULL },
 	{ "save_global_history", XT_S_INT, XT_SF_RESTART , &save_global_history, NULL, NULL },
 	{ "save_rejected_cookies", XT_S_INT, XT_SF_RESTART , &save_rejected_cookies, NULL, NULL },
+	{ "session_timeout", XT_S_INT, 0 , &session_timeout, NULL, NULL },
+	{ "session_autosave", XT_S_INT, 0 , &session_autosave, NULL, NULL },
 	{ "single_instance", XT_S_INT, XT_SF_RESTART , &single_instance, NULL, NULL },
+	{ "show_tabs", XT_S_INT, 0, &show_tabs, NULL, NULL },
+	{ "show_url", XT_S_INT, 0, &show_url, NULL, NULL },
 	{ "ssl_ca_file", XT_S_STR, 0 , NULL, &ssl_ca_file, NULL },
 	{ "ssl_strict_certs", XT_S_INT, 0 , &ssl_strict_certs, NULL, NULL },
 	{ "user_agent", XT_S_STR, 0 , NULL, &user_agent, NULL },
@@ -569,6 +589,9 @@ int			updating_cl_tabs = 0;
 int			updating_fl_tabs = 0;
 char			*global_search;
 uint64_t		blocked_cookies = 0;
+char			named_session[PATH_MAX];
+void			update_favicon(struct tab *);
+int			icon_size_map(int);
 
 void
 load_webkit_string(struct tab *t, const char *str)
@@ -722,6 +745,8 @@ char			*fl_session_key;	/* favorites list */
 
 char			work_dir[PATH_MAX];
 char			certs_dir[PATH_MAX];
+char			cache_dir[PATH_MAX];
+char			sessions_dir[PATH_MAX];
 char			cookie_file[PATH_MAX];
 SoupURI			*proxy_uri = NULL;
 SoupSession		*session;
@@ -902,14 +927,15 @@ match_alias(char *url_in)
 {
 	struct alias		*a;
 	char			*arg;
-	char			*url_out = NULL;
+	char			*url_out = NULL, *search;
 
-	arg = url_in;
+	search = g_strdup(url_in);
+	arg = search;
 	if (strsep(&arg, ":") == NULL)
 		errx(1, "match_alias: NULL URL");
 
 	TAILQ_FOREACH(a, &aliases, entry) {
-		if (!strcmp(url_in, a->a_name))
+		if (!strcmp(search, a->a_name))
 			break;
 	}
 
@@ -921,6 +947,8 @@ match_alias(char *url_in)
 		else
 			url_out = g_strdup(a->a_uri);
 	}
+
+	g_free(search);
 
 	return (url_out);
 }
@@ -1308,7 +1336,7 @@ config_parse(char *filename, int runtime)
 					errx(1, "invalid value for %s", var);
 				handled = 1;
 				break;
-			} else {
+			} else
 				switch (rs[i].type) {
 				case XT_S_INT:
 					p = rs[i].ival;
@@ -1329,7 +1357,6 @@ config_parse(char *filename, int runtime)
 				default:
 					errx(1, "invalid type for %s", var);
 				}
-			}
 			break;
 		}
 		if (handled == 0)
@@ -1547,46 +1574,89 @@ quit(struct tab *t, struct karg *args)
 }
 
 int
-restore_saved_tabs(void)
+open_tabs(struct tab *t, struct karg *a)
 {
 	char		file[PATH_MAX];
-	FILE		*f;
+	FILE		*f = NULL;
 	char		*uri = NULL;
-	int		empty_saved_tabs_file = 1;
-	int		unlink_file = 0;
-	struct stat	sb;
+	int		rv = 1;
+	struct tab	*ti, *tt;
 
-	snprintf(file, sizeof file, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_RESTART_TABS_FILE);
-	if (stat(file, &sb) == -1)
-		snprintf(file, sizeof file, "%s/%s/%s",
-		    pwd->pw_dir, XT_DIR, XT_SAVED_TABS_FILE);
-	else
-		unlink_file = 1;
+	if (a == NULL)
+		goto done;
 
+	snprintf(file, sizeof file, "%s/%s", sessions_dir, a->s);
 	if ((f = fopen(file, "r")) == NULL)
-		return (empty_saved_tabs_file);
+		goto done;
+
+	ti = TAILQ_LAST(&tabs, tab_list);
 
 	for (;;) {
 		if ((uri = fparseln(f, NULL, NULL, NULL, 0)) == NULL)
 			if (feof(f) || ferror(f))
 				break;
 
-		if (uri && strlen(uri)) {
-			create_new_tab(uri, NULL, 1);
-			empty_saved_tabs_file = 0;
+		/* retrieve session name */
+		if (uri && g_str_has_prefix(uri, XT_SAVE_SESSION_ID)) {
+			strlcpy(named_session,
+			    &uri[strlen(XT_SAVE_SESSION_ID)],
+			    sizeof named_session);
+			continue;
 		}
+
+		if (uri && strlen(uri))
+			create_new_tab(uri, NULL, 1);
 
 		free(uri);
 		uri = NULL;
 	}
 
-	fclose(f);
+	/* close open tabs */
+	if (a->i == XT_SES_CLOSETABS && ti != NULL) {
+		for (;;) {
+			tt = TAILQ_FIRST(&tabs);
+			if (tt != ti) {
+				delete_tab(tt);
+				continue;
+			}
+			delete_tab(tt);
+			break;
+		}
+	}
+
+	rv = 0;
+done:
+	if (f)
+		fclose(f);
+
+	return (rv);
+}
+
+int
+restore_saved_tabs(void)
+{
+	char		file[PATH_MAX];
+	int		unlink_file = 0;
+	struct stat	sb;
+	struct karg	a;
+	int		rv = 0;
+
+	snprintf(file, sizeof file, "%s/%s",
+	    sessions_dir, XT_RESTART_TABS_FILE);
+	if (stat(file, &sb) == -1)
+		a.s = XT_SAVED_TABS_FILE;
+	else {
+		unlink_file = 1;
+		a.s = XT_RESTART_TABS_FILE;
+	}
+
+	a.i = XT_SES_DONOTHING;
+	rv = open_tabs(NULL, &a);
 
 	if (unlink_file)
 		unlink(file);
 
-	return (empty_saved_tabs_file);
+	return (rv);
 }
 
 int
@@ -1601,16 +1671,20 @@ save_tabs(struct tab *t, struct karg *a)
 	if (a == NULL)
 		return (1);
 	if (a->s == NULL)
-		return (1);
-
-	snprintf(file, sizeof file, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, a->s);
+		snprintf(file, sizeof file, "%s/%s",
+		    sessions_dir, named_session);
+	else
+		snprintf(file, sizeof file, "%s/%s", sessions_dir, a->s);
 
 	if ((f = fopen(file, "w")) == NULL) {
 		show_oops(t, "Can't open save_tabs file: %s", strerror(errno));
 		return (1);
 	}
 
+	/* save session name */
+	fprintf(f, "%s%s\n", XT_SAVE_SESSION_ID, named_session);
+
+	/* save tabs */
 	TAILQ_FOREACH(ti, &tabs, entry) {
 		frame = webkit_web_view_get_main_frame(ti->wv);
 		uri = webkit_web_frame_get_uri(frame);
@@ -1628,7 +1702,7 @@ save_tabs_and_quit(struct tab *t, struct karg *args)
 {
 	struct karg		a;
 
-	a.s = XT_SAVED_TABS_FILE;
+	a.s = NULL;
 	save_tabs(t, &a);
 	quit(t, NULL);
 
@@ -1763,13 +1837,12 @@ toggle_cwl(struct tab *t, struct karg *args)
 	else
 		dom_toggle = dom;
 
-	if (es) {
+	if (es)
 		/* enable cookies for domain */
 		wl_add(dom_toggle, &c_wl, 0);
-	} else {
+	else
 		/* disable cookies for domain */
 		RB_REMOVE(domain_list, &c_wl, d);
-	}
 
 	webkit_web_view_reload(t->wv);
 
@@ -1860,7 +1933,10 @@ int
 focus(struct tab *t, struct karg *args)
 {
 	if (t == NULL || args == NULL)
-		errx(1, "focus");
+		return (1);
+
+	if (show_url == 0)
+		return (0);
 
 	if (args->i == XT_FOCUS_URI)
 		gtk_widget_grab_focus(GTK_WIDGET(t->uri_entry));
@@ -1940,6 +2016,7 @@ about(struct tab *t, struct karg *args)
 	    "<li>Marco Peereboom &lt;marco@peereboom.us&gt;</li>"
 	    "<li>Stevan Andjelkovic &lt;stevan@student.chalmers.se&gt;</li>"
 	    "<li>Edd Barrett &lt;vext01@gmail.com&gt; </li>"
+	    "<li>Todd T. Fries &lt;todd@fries.net&gt; </li>"
 	    "</ul>"
 	    "Copyrights and licenses can be found on the XXXterm "
 	    "<a href=\"http://opensource.conformal.com/wiki/XXXTerm\">website</a>"
@@ -2503,6 +2580,7 @@ cert_cmd(struct tab *t, struct karg *args)
 	uri = (char *)webkit_web_frame_get_uri(frame);
 	if (uri && strlen(uri) == 0) {
 		show_oops(t, "Invalid URI");
+		return (1);
 	}
 	if ((s = connect_socket_from_uri(uri, domain, sizeof domain)) == -1) {
 		show_oops(t, "Invalid certidicate URI: %s", uri);
@@ -2968,6 +3046,75 @@ move(struct tab *t, struct karg *args)
 	return (XT_CB_HANDLED);
 }
 
+void
+url_set_visibility(void)
+{
+	struct tab		*t;
+
+	TAILQ_FOREACH(t, &tabs, entry) {
+		if (show_url == 0) {
+			gtk_widget_hide(t->toolbar);
+			gtk_widget_grab_focus(GTK_WIDGET(t->wv));
+		} else
+			gtk_widget_show(t->toolbar);
+	}
+}
+
+void
+notebook_tab_set_visibility(GtkNotebook *notebook)
+{
+	if (show_tabs == 0)
+		gtk_notebook_set_show_tabs(notebook, FALSE);
+	else
+		gtk_notebook_set_show_tabs(notebook, TRUE);
+}
+
+int
+fullscreen(struct tab *t, struct karg *args)
+{
+	DNPRINTF(XT_D_TAB, "urlaction: %p %d %d\n", t, args->i, t->focus_wv);
+
+	if (t == NULL)
+		return (XT_CB_PASSTHROUGH);
+
+	if (show_url == 0)
+		show_url = show_tabs = 1;
+	else
+		show_url = show_tabs = 0;
+
+	url_set_visibility();
+	notebook_tab_set_visibility(notebook);
+
+	return (XT_CB_HANDLED);
+}
+
+int
+urlaction(struct tab *t, struct karg *args)
+{
+	int			rv = XT_CB_HANDLED;
+
+	DNPRINTF(XT_D_TAB, "urlaction: %p %d %d\n", t, args->i, t->focus_wv);
+
+	if (t == NULL)
+		return (XT_CB_PASSTHROUGH);
+
+	switch (args->i) {
+	case XT_URL_SHOW:
+		if (show_url == 0) {
+			show_url = 1;
+			url_set_visibility();
+		}
+		break;
+	case XT_URL_HIDE:
+		if (show_url == 1) {
+			show_url = 0;
+			url_set_visibility();
+		}
+		break;
+	}
+	return (rv);
+}
+
 int
 tabaction(struct tab *t, struct karg *args)
 {
@@ -3013,6 +3160,18 @@ tabaction(struct tab *t, struct karg *args)
 		webkit_web_view_load_uri(t->wv, url);
 		if (newuri)
 			g_free(newuri);
+		break;
+	case XT_TAB_SHOW:
+		if (show_tabs == 0) {
+			show_tabs = 1;
+			notebook_tab_set_visibility(notebook);
+		}
+		break;
+	case XT_TAB_HIDE:
+		if (show_tabs == 1) {
+			show_tabs = 0;
+			notebook_tab_set_visibility(notebook);
+		}
 		break;
 	case XT_TAB_UNDO_CLOSE:
 		if (undo_count == 0) {
@@ -3081,20 +3240,18 @@ movetab(struct tab *t, struct karg *args)
 		case XT_TAB_NEXT:
 			/* if at the last page, loop around to the first */
 			if (gtk_notebook_get_current_page(notebook) ==
-			    gtk_notebook_get_n_pages(notebook) - 1) {
+			    gtk_notebook_get_n_pages(notebook) - 1)
 				gtk_notebook_set_current_page(notebook, 0);
-			} else {
+			else
 				gtk_notebook_next_page(notebook);
-			}
 			break;
 		case XT_TAB_PREV:
 			/* if at the first page, loop around to the last */
-			if (gtk_notebook_current_page(notebook) == 0) {
+			if (gtk_notebook_current_page(notebook) == 0)
 				gtk_notebook_set_current_page(notebook,
 							      gtk_notebook_get_n_pages(notebook) - 1);
-			} else {
+			else
 				gtk_notebook_prev_page(notebook);
-			}
 			break;
 		case XT_TAB_FIRST:
 			gtk_notebook_set_current_page(notebook, 0);
@@ -3725,10 +3882,136 @@ set(struct tab *t, struct karg *args)
 		g_free(footer);
 
 		load_webkit_string(t, page);
-	} else {
+	} else
 		show_oops(t, "Invalid command: %s", pars);
-	}
 
+	return (XT_CB_PASSTHROUGH);
+}
+
+int
+session_save(struct tab *t, char *filename, char **ret)
+{
+	struct karg		a;
+	char			*f = filename;
+	int			rv = 1;
+
+	f += strlen("save");
+	while (*f == ' ' && *f != '\0')
+		f++;
+	if (strlen(f) == 0)
+		goto done;
+
+	*ret = f;
+	if (f[0] == '.' || f[0] == '/')
+		goto done;
+
+	a.s = f;
+	if (save_tabs(t, &a))
+		goto done;
+	strlcpy(named_session, f, sizeof named_session);
+
+	rv = 0;
+done:
+	return (rv);
+}
+
+int
+session_open(struct tab *t, char *filename, char **ret)
+{
+	struct karg		a;
+	char			*f = filename;
+	int			rv = 1;
+
+	f += strlen("open");
+	while (*f == ' ' && *f != '\0')
+		f++;
+	if (strlen(f) == 0)
+		goto done;
+
+	*ret = f;
+	if (f[0] == '.' || f[0] == '/')
+		goto done;
+
+	a.s = f;
+	a.i = XT_SES_CLOSETABS;
+	if (open_tabs(t, &a))
+		goto done;
+
+	strlcpy(named_session, f, sizeof named_session);
+
+	rv = 0;
+done:
+	return (rv);
+}
+
+int
+session_delete(struct tab *t, char *filename, char **ret)
+{
+	char			file[PATH_MAX];
+	char			*f = filename;
+	int			rv = 1;
+
+	f += strlen("delete");
+	while (*f == ' ' && *f != '\0')
+		f++;
+	if (strlen(f) == 0)
+		goto done;
+
+	*ret = f;
+	if (f[0] == '.' || f[0] == '/')
+		goto done;
+
+	snprintf(file, sizeof file, "%s/%s", sessions_dir, f);
+	if (unlink(file))
+		goto done;
+
+	if (!strcmp(f, named_session))
+		strlcpy(named_session, XT_SAVED_TABS_FILE,
+		    sizeof named_session);
+
+	rv = 0;
+done:
+	return (rv);
+}
+
+int
+session_cmd(struct tab *t, struct karg *args)
+{
+	char			*action = NULL;
+	char			*filename = NULL;
+
+	if (t == NULL)
+		return (1);
+
+	if ((action = getparams(args->s, "session")))
+		;
+	else
+		action = "show";
+
+	if (!strcmp(action, "show"))
+		show_oops(t, "Current session: %s", named_session[0] == '\0' ? 
+		    XT_SAVED_TABS_FILE : named_session);
+	else if (g_str_has_prefix(action, "save ")) {
+		if (session_save(t, action, &filename)) {
+			show_oops(t, "Can't save session: %s",
+			    filename ? filename : "INVALID");
+			goto done;
+		}
+	} else if (g_str_has_prefix(action, "open ")) {
+		if (session_open(t, action, &filename)) {
+			show_oops(t, "Can't open session: %s",
+			    filename ? filename : "INVALID");
+			goto done;
+		}
+	} else if (g_str_has_prefix(action, "delete ")) {
+		if (session_delete(t, action, &filename)) {
+			show_oops(t, "Can't delete session: %s",
+			    filename ? filename : "INVALID");
+			goto done;
+		}
+	} else
+		show_oops(t, "Invalid command: %s", action);
+done:
 	return (XT_CB_PASSTHROUGH);
 }
 
@@ -3885,9 +4168,9 @@ struct cmd {
 	{ "q!",			0,	quit,			{0} },
 	{ "qa",			0,	quit,			{0} },
 	{ "qa!",		0,	quit,			{0} },
-	{ "w",			0,	save_tabs,		{.s = XT_SAVED_TABS_FILE} },
-	{ "wq",			0,	save_tabs_and_quit,	{.s = XT_SAVED_TABS_FILE} },
-	{ "wq!",		0,	save_tabs_and_quit,	{.s = XT_SAVED_TABS_FILE} },
+	{ "w",			0,	save_tabs,		{0} },
+	{ "wq",			0,	save_tabs_and_quit,	{0} },
+	{ "wq!",		0,	save_tabs_and_quit,	{0} },
 	{ "help",		0,	help,			{0} },
 	{ "about",		0,	about,			{0} },
 	{ "stats",		0,	stats,			{0} },
@@ -3905,6 +4188,10 @@ struct cmd {
 	{ "history"	,	0,	xtp_page_hl,		{0} },
 	{ "home"	,	0,	go_home,		{0} },
 	{ "restart"	,	0,	restart,		{0} },
+	{ "urlhide",		0,	urlaction,		{.i = XT_URL_HIDE} },
+	{ "urlh",		0,	urlaction,		{.i = XT_URL_HIDE} },
+	{ "urlshow",		0,	urlaction,		{.i = XT_URL_SHOW} },
+	{ "urls",		0,	urlaction,		{.i = XT_URL_SHOW} },
 
 	{ "1",			0,	move,			{.i = XT_MOVE_TOP} },
 	{ "print",		0,	print_page,		{0} },
@@ -3918,6 +4205,10 @@ struct cmd {
 	{ "tabe",		1,	tabaction,		{.i = XT_TAB_NEW} },
 	{ "tabclose",		0,	tabaction,		{.i = XT_TAB_DELETE} },
 	{ "tabc",		0,	tabaction,		{.i = XT_TAB_DELETE} },
+	{ "tabshow",		1,	tabaction,		{.i = XT_TAB_SHOW} },
+	{ "tabs",		1,	tabaction,		{.i = XT_TAB_SHOW} },
+	{ "tabhide",		1,	tabaction,		{.i = XT_TAB_HIDE} },
+	{ "tabh",		1,	tabaction,		{.i = XT_TAB_HIDE} },
 	{ "quit",		0,	tabaction,		{.i = XT_TAB_DELQUIT} },
 	{ "q",			0,	tabaction,		{.i = XT_TAB_DELQUIT} },
 	/* XXX add count to these commands */
@@ -3934,6 +4225,11 @@ struct cmd {
 
 	/* settings */
 	{ "set",		1,	set,			{0} },
+	{ "fullscreen",		0,	fullscreen,		{0} },
+	{ "f",			0,	fullscreen,		{0} },
+
+	/* sessions */
+	{ "session",		1,	session_cmd,		{0} },
 };
 
 gboolean
@@ -4370,6 +4666,197 @@ done:
 }
 
 void
+free_favicon(struct tab *t)
+{
+	DNPRINTF(XT_D_DOWNLOAD, "%s: down %p req %p pix %p\n",
+	    __func__, t->icon_download, t->icon_request, t->icon_pixbuf);
+
+	if (t->icon_request)
+		g_object_unref(t->icon_request);
+	if (t->icon_pixbuf)
+		g_object_unref(t->icon_pixbuf);
+	if (t->icon_dest_uri)
+		g_free(t->icon_dest_uri);
+
+	t->icon_pixbuf = NULL;
+	t->icon_request = NULL;
+	t->icon_dest_uri = NULL;
+}
+
+void
+abort_favicon_download(struct tab *t)
+{
+	DNPRINTF(XT_D_DOWNLOAD, "%s: down %p\n", __func__, t->icon_download);
+
+	if (t->icon_download) {
+		webkit_download_cancel(t->icon_download);
+		g_object_unref(t->icon_download);
+		t->icon_download = NULL;
+	} else
+		free_favicon(t);
+
+	gtk_entry_set_icon_from_icon_name(GTK_ENTRY(t->uri_entry),
+	    GTK_ENTRY_ICON_PRIMARY, "text-html");
+}
+
+void
+set_favicon_from_file(struct tab *t, char *file)
+{
+	gint			width, height;
+	GdkPixbuf		*pixbuf, *scaled;
+	struct stat		sb;
+
+	if (t == NULL || file == NULL)
+		return;
+	if (t->icon_pixbuf) {
+		DNPRINTF(XT_D_DOWNLOAD, "%s: icon already set\n", __func__);
+		return;
+	}
+
+	if (g_str_has_prefix(file, "file://"))
+		file += strlen("file://");
+	DNPRINTF(XT_D_DOWNLOAD, "%s: loading %s\n", __func__, file);
+
+	if (!stat(file, &sb)) {
+		if (sb.st_size == 0) {
+			/* corrupt icon so trash it */
+			DNPRINTF(XT_D_DOWNLOAD, "%s: corrupt icon %s\n",
+			    __func__, file);
+			unlink(file);
+			/* no need to set icon to default here */
+			return;
+		}
+	}
+
+	pixbuf = gdk_pixbuf_new_from_file(file, NULL);
+	if (pixbuf == NULL) {
+		gtk_entry_set_icon_from_icon_name(GTK_ENTRY(t->uri_entry),
+		    GTK_ENTRY_ICON_PRIMARY, "text-html");
+		return;
+	}
+
+	g_object_get(pixbuf, "width", &width, "height", &height,
+	    (char *)NULL);
+	DNPRINTF(XT_D_DOWNLOAD, "%s: tab %d icon size %dx%d\n",
+	    __func__, t->tab_id, width, height);
+
+	if (width > 16 || height > 16) {
+		scaled = gdk_pixbuf_scale_simple(pixbuf, 16, 16,
+		    GDK_INTERP_BILINEAR);
+		g_object_unref(pixbuf);
+	} else
+		scaled = pixbuf;
+
+	if (scaled == NULL) {
+		scaled = gdk_pixbuf_scale_simple(pixbuf, 16, 16,
+		    GDK_INTERP_BILINEAR);
+		return;
+	}
+
+	t->icon_pixbuf = scaled;
+	gtk_entry_set_icon_from_pixbuf(GTK_ENTRY(t->uri_entry),
+	    GTK_ENTRY_ICON_PRIMARY, t->icon_pixbuf);
+}
+
+void
+favicon_download_status_changed_cb(WebKitDownload *download, GParamSpec *spec,
+    struct tab *t)
+{
+	WebKitDownloadStatus	status = webkit_download_get_status (download);
+
+	if (t == NULL)
+		return;
+
+	DNPRINTF(XT_D_DOWNLOAD, "%s: tab %d status %d\n",
+	    __func__, t->tab_id, status);
+
+	switch (status) {
+	case WEBKIT_DOWNLOAD_STATUS_ERROR:
+		/* -1 */
+		break;
+	case WEBKIT_DOWNLOAD_STATUS_CREATED:
+		/* 0 */
+		break;
+	case WEBKIT_DOWNLOAD_STATUS_STARTED:
+		/* 1 */
+		break;
+	case WEBKIT_DOWNLOAD_STATUS_CANCELLED:
+		/* 2 */
+		DNPRINTF(XT_D_DOWNLOAD, "%s: freeing favicon %d\n",
+		    __func__, t->tab_id);
+		free_favicon(t);
+		break;
+	case WEBKIT_DOWNLOAD_STATUS_FINISHED:
+		/* 3 */
+		DNPRINTF(XT_D_DOWNLOAD, "%s: setting icon to %s\n",
+		    __func__, t->icon_dest_uri);
+		set_favicon_from_file(t, t->icon_dest_uri);
+		/* these will be freed post callback */
+		t->icon_request = NULL;
+		t->icon_download = NULL;
+		break;
+	default:
+		break;
+	}
+}
+
+void
+notify_icon_loaded_cb(WebKitWebView *wv, gchar *uri, struct tab *t)
+{
+	gchar			*name_hash, file[PATH_MAX];
+	struct stat		sb;
+
+	DNPRINTF(XT_D_DOWNLOAD, "notify_icon_loaded_cb %s\n", uri);
+
+	if (uri == NULL || t == NULL)
+		return;
+
+	if (t->icon_request) {
+		DNPRINTF(XT_D_DOWNLOAD, "%s: download in progress\n", __func__);
+		return;
+	}
+
+	/* check to see if we got the icon in cache */
+	name_hash = g_compute_checksum_for_string(G_CHECKSUM_SHA256, uri, -1);
+	snprintf(file, sizeof file, "%s/%s.ico", cache_dir, name_hash);
+	g_free(name_hash);
+
+	if (!stat(file, &sb)) {
+		if (sb.st_size > 0) {
+			DNPRINTF(XT_D_DOWNLOAD, "%s: loading from cache %s\n",
+			    __func__, file);
+			set_favicon_from_file(t, file);
+			return;
+		}
+
+		/* corrupt icon so trash it */
+		DNPRINTF(XT_D_DOWNLOAD, "%s: corrupt icon %s\n",
+		    __func__, file);
+		unlink(file);
+	}
+
+	/* create download for icon */
+	t->icon_request = webkit_network_request_new(uri);
+	if (t->icon_request == NULL) {
+		DNPRINTF(XT_D_DOWNLOAD, "%s: invalid uri %s\n",
+		    __func__, uri);
+		return;
+	}
+
+	t->icon_download = webkit_download_new(t->icon_request);
+
+	/* we have to free icon_dest_uri later */
+	t->icon_dest_uri = g_strdup_printf("file://%s", file);
+	webkit_download_set_destination_uri(t->icon_download,
+	    t->icon_dest_uri);
+
+	g_signal_connect(G_OBJECT(t->icon_download), "notify::status",
+	    G_CALLBACK(favicon_download_status_changed_cb), t);
+
+	webkit_download_start(t->icon_download);
+}
+
+void
 notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 {
 	WebKitWebFrame		*frame;
@@ -4377,6 +4864,7 @@ notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 	struct history		*h, find;
 	int			add = 0;
 	const gchar		*s_loading;
+	struct karg		a;
 
 	DNPRINTF(XT_D_URL, "notify_load_status_cb: %d\n",
 	    webkit_web_view_get_load_status(wview));
@@ -4386,6 +4874,7 @@ notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 
 	switch (webkit_web_view_get_load_status(wview)) {
 	case WEBKIT_LOAD_PROVISIONAL:
+		abort_favicon_download(t);
 #if GTK_CHECK_VERSION(2, 20, 0)
 		gtk_widget_show(t->spinner);
 		gtk_spinner_start(GTK_SPINNER(t->spinner));
@@ -4415,6 +4904,12 @@ notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 		}
 
 		show_ca_status(t, uri);
+
+		/* we know enough to autosave the session */
+		if (session_autosave) {
+			a.s = NULL;
+			save_tabs(t, &a);
+		}
 		break;
 
 	case WEBKIT_LOAD_FIRST_VISUALLY_NON_EMPTY_LAYOUT:
@@ -5012,7 +5507,7 @@ cmd_focusout_cb(GtkWidget *w, GdkEventFocus *e, struct tab *t)
 	hide_cmd(t);
 	hide_oops(t);
 
-	if (t->focus_wv)
+	if (show_url == 0 || t->focus_wv)
 		gtk_widget_grab_focus(GTK_WIDGET(t->wv));
 	else
 		gtk_widget_grab_focus(GTK_WIDGET(t->uri_entry));
@@ -5120,6 +5615,7 @@ stop_cb(GtkWidget *w, struct tab *t)
 	}
 
 	webkit_web_frame_stop_loading(frame);
+	abort_favicon_download(t);
 }
 
 void
@@ -5212,14 +5708,14 @@ create_toolbar(struct tab *t)
 
 	if (fancy_bar) {
 		/* backward button */
-		t->backward = create_button("go-back", GTK_STOCK_GO_BACK, 0);
+		t->backward = create_button("GoBack", GTK_STOCK_GO_BACK, 0);
 		gtk_widget_set_sensitive(t->backward, FALSE);
 		g_signal_connect(G_OBJECT(t->backward), "clicked",
 		    G_CALLBACK(backward_cb), t);
 		gtk_box_pack_start(GTK_BOX(b), t->backward, FALSE, FALSE, 0);
 
 		/* forward button */
-		t->forward = create_button("go-forward",GTK_STOCK_GO_FORWARD, 0);
+		t->forward = create_button("GoForward",GTK_STOCK_GO_FORWARD, 0);
 		gtk_widget_set_sensitive(t->forward, FALSE);
 		g_signal_connect(G_OBJECT(t->forward), "clicked",
 		    G_CALLBACK(forward_cb), t);
@@ -5227,7 +5723,7 @@ create_toolbar(struct tab *t)
 		    FALSE, 0);
 
 		/* stop button */
-		t->stop = create_button("stop", GTK_STOCK_STOP, 0);
+		t->stop = create_button("Stop", GTK_STOCK_STOP, 0);
 		gtk_widget_set_sensitive(t->stop, FALSE);
 		g_signal_connect(G_OBJECT(t->stop), "clicked",
 		    G_CALLBACK(stop_cb), t);
@@ -5235,7 +5731,7 @@ create_toolbar(struct tab *t)
 		    FALSE, 0);
 
 		/* JS button */
-		t->js_toggle = create_button("js-toggle", enable_scripts ?
+		t->js_toggle = create_button("JS-Toggle", enable_scripts ?
 		        GTK_STOCK_MEDIA_PLAY : GTK_STOCK_MEDIA_PAUSE, 0);
 		gtk_widget_set_sensitive(t->js_toggle, TRUE);
 		g_signal_connect(G_OBJECT(t->js_toggle), "clicked",
@@ -5252,6 +5748,10 @@ create_toolbar(struct tab *t)
 	gtk_container_set_border_width(GTK_CONTAINER(eb1), 1);
 	gtk_box_pack_start(GTK_BOX(eb1), t->uri_entry, TRUE, TRUE, 0);
 	gtk_box_pack_start(GTK_BOX(b), eb1, TRUE, TRUE, 0);
+
+	/* set empty favicon */
+	gtk_entry_set_icon_from_icon_name(GTK_ENTRY(t->uri_entry),
+	    GTK_ENTRY_ICON_PRIMARY, "text-html");
 
 	/* search entry */
 	if (fancy_bar && search_string) {
@@ -5350,6 +5850,8 @@ undo_close_tab_save(struct tab *t)
 void
 delete_tab(struct tab *t)
 {
+	struct karg		a;
+
 	DNPRINTF(XT_D_TAB, "delete_tab: %p\n", t);
 
 	if (t == NULL)
@@ -5358,6 +5860,7 @@ delete_tab(struct tab *t)
 	TAILQ_REMOVE(&tabs, t, entry);
 
 	/* halt all webkit activity */
+	abort_favicon_download(t);
 	webkit_web_view_stop_loading(t->wv);
 	undo_close_tab_save(t);
 
@@ -5368,6 +5871,13 @@ delete_tab(struct tab *t)
 	recalc_tabs();
 	if (TAILQ_EMPTY(&tabs))
 		create_new_tab(NULL, NULL, 1);
+
+
+	/* recreate session */
+	if (session_autosave) {
+		a.s = NULL;
+		save_tabs(t, &a);
+	}
 }
 
 void
@@ -5436,10 +5946,9 @@ create_new_tab(char *title, struct undo *u, int focus)
 	t->spinner = gtk_spinner_new ();
 #endif
 	t->label = gtk_label_new(title);
-	bb = create_button("my-close-button", GTK_STOCK_CLOSE, 1);
+	bb = create_button("Close", GTK_STOCK_CLOSE, 1);
 	gtk_widget_set_size_request(t->label, 100, 0);
 	gtk_widget_set_size_request(b, 130, 0);
-	gtk_notebook_set_homogeneous_tabs(notebook, TRUE);
 
 	gtk_box_pack_start(GTK_BOX(b), bb, FALSE, FALSE, 0);
 	gtk_box_pack_start(GTK_BOX(b), t->label, FALSE, FALSE, 0);
@@ -5530,10 +6039,13 @@ create_new_tab(char *title, struct undo *u, int focus)
 	    "signal::event", (GCallback)webview_event_cb, t,
 	    "signal::load-finished", (GCallback)webview_load_finished_cb, t,
 	    "signal::load-progress-changed", (GCallback)webview_progress_changed_cb, t,
+#if WEBKIT_CHECK_VERSION(1, 1, 18)
+	    "signal::icon-loaded", (GCallback)notify_icon_loaded_cb, t,
+#endif
 	    "signal::button_press_event", (GCallback)wv_button_cb, t,
 	    (char *)NULL);
-	g_signal_connect(t->wv, "notify::load-status",
-	    G_CALLBACK(notify_load_status_cb), t);
+	g_signal_connect(t->wv,
+	    "notify::load-status", G_CALLBACK(notify_load_status_cb), t);
 
 	/* hijack the unused keys as if we were the browser */
 	g_object_connect((GObject*)t->toolbar,
@@ -5546,8 +6058,7 @@ create_new_tab(char *title, struct undo *u, int focus)
 	/* hide stuff */
 	hide_cmd(t);
 	hide_oops(t);
-	if (showurl == 0)
-		gtk_widget_hide(t->toolbar);
+	url_set_visibility();
 
 	if (focus) {
 		gtk_notebook_set_current_page(notebook, t->tab_id);
@@ -5557,8 +6068,12 @@ create_new_tab(char *title, struct undo *u, int focus)
 
 	if (load)
 		webkit_web_view_load_uri(t->wv, title);
-	else
-		gtk_widget_grab_focus(GTK_WIDGET(t->uri_entry));
+	else {
+		if (show_url == 1)
+			gtk_widget_grab_focus(GTK_WIDGET(t->uri_entry));
+		else
+			gtk_widget_grab_focus(GTK_WIDGET(t->wv));
+	}
 
 	t->bfl = webkit_web_view_get_back_forward_list(t->wv);
 	/* restore the tab's history */
@@ -5674,9 +6189,9 @@ GtkWidget *
 create_button(char *name, char *stockid, int size)
 {
 	GtkWidget *button, *image;
-	char *rcstring;
+	gchar *rcstring;
 	int gtk_icon_size;
-	asprintf(&rcstring,
+	rcstring = g_strdup_printf(
 	    "style \"%s-style\"\n"
 	    "{\n"
 	    "  GtkWidget::focus-padding = 0\n"
@@ -5686,7 +6201,7 @@ create_button(char *name, char *stockid, int size)
 	    "}\n"
 	    "widget \"*.%s\" style \"%s-style\"",name,name,name);
 	gtk_rc_parse_string(rcstring);
-	free(rcstring);
+	g_free(rcstring);
 	button = gtk_button_new();
 	gtk_button_set_focus_on_click(GTK_BUTTON(button), FALSE);
 	gtk_icon_size = icon_size_map(size?size:icon_size);
@@ -5696,6 +6211,8 @@ create_button(char *name, char *stockid, int size)
 	gtk_container_set_border_width(GTK_CONTAINER(button), 1);
 	gtk_container_add(GTK_CONTAINER(button), GTK_WIDGET(image));
 	gtk_widget_set_name(button, name);
+	gtk_button_set_relief(GTK_BUTTON(button), GTK_RELIEF_NONE);
+	gtk_widget_set_tooltip_text(button, name);
 
 	return button;
 }
@@ -5721,14 +6238,11 @@ create_canvas(void)
 	vbox = gtk_vbox_new(FALSE, 0);
 	gtk_box_set_spacing(GTK_BOX(vbox), 0);
 	notebook = GTK_NOTEBOOK(gtk_notebook_new());
-	if (showtabs == 0)
-		gtk_notebook_set_show_tabs(notebook, FALSE);
-	else {
-		gtk_notebook_set_tab_hborder(notebook, 0);
-		gtk_notebook_set_tab_vborder(notebook, 0);
-	}
-	gtk_notebook_set_show_border(notebook, FALSE);
+	gtk_notebook_set_tab_hborder(notebook, 0);
+	gtk_notebook_set_tab_vborder(notebook, 0);
 	gtk_notebook_set_scrollable(notebook, TRUE);
+	notebook_tab_set_visibility(notebook);
+	gtk_notebook_set_show_border(notebook, FALSE);
 	gtk_widget_set_can_focus(GTK_WIDGET(notebook), FALSE);
 
 	abtn = gtk_button_new();
@@ -5971,10 +6485,6 @@ send_url_to_socket(char *url)
 	int			s, len, rv = -1;
 	struct sockaddr_un	sa;
 
-	pwd = getpwuid(getuid());
-	if (pwd == NULL)
-		errx(1, "invalid user %d", getuid());
-
 	if ((s = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
 		warnx("send_url_to_socket: socket");
 		return (-1);
@@ -6107,7 +6617,7 @@ void
 usage(void)
 {
 	fprintf(stderr,
-	    "%s [-nSTVt][-f file] url ...\n", __progname);
+	    "%s [-nSTVt][-f file][-s session] url ...\n", __progname);
 	exit(0);
 }
 
@@ -6115,27 +6625,33 @@ int
 main(int argc, char *argv[])
 {
 	struct stat		sb;
-	int			c, focus = 1, s, optn = 0;
+	int			c, s, optn = 0, focus = 1;
 	char			conf[PATH_MAX] = { '\0' };
 	char			file[PATH_MAX];
 	char			*env_proxy = NULL;
 	FILE			*f = NULL;
+	struct karg		a;
 
 	start_argv = argv;
 
-	while ((c = getopt(argc, argv, "STVf:tn")) != -1) {
+	strlcpy(named_session, XT_SAVED_TABS_FILE, sizeof named_session);
+
+	while ((c = getopt(argc, argv, "STVf:s:tn")) != -1) {
 		switch (c) {
 		case 'S':
-			showurl = 0;
+			show_url = 0;
 			break;
 		case 'T':
-			showtabs = 0;
+			show_tabs = 0;
 			break;
 		case 'V':
 			errx(0 , "Version: %s", version);
 			break;
 		case 'f':
 			strlcpy(conf, optarg, sizeof(conf));
+			break;
+		case 's':
+			strlcpy(named_session, optarg, sizeof(named_session));
 			break;
 		case 't':
 			tabless = 1;
@@ -6206,6 +6722,23 @@ main(int argc, char *argv[])
 			err(1, "chmod");
 	}
 
+	/* icon cache dir */
+	snprintf(cache_dir, sizeof cache_dir, "%s/%s/%s",
+	    pwd->pw_dir, XT_DIR, XT_CACHE_DIR);
+	if (stat(cache_dir, &sb)) {
+		if (mkdir(cache_dir, S_IRWXU) == -1)
+			err(1, "mkdir cache_dir");
+		if (stat(cache_dir, &sb))
+			err(1, "stat cache_dir");
+	}
+	if (S_ISDIR(sb.st_mode) == 0)
+		errx(1, "%s not a dir", cache_dir);
+	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
+		warnx("fixing invalid permissions on %s", cache_dir);
+		if (chmod(cache_dir, S_IRWXU) == -1)
+			err(1, "chmod");
+	}
+
 	/* certs dir */
 	snprintf(certs_dir, sizeof certs_dir, "%s/%s/%s",
 	    pwd->pw_dir, XT_DIR, XT_CERT_DIR);
@@ -6223,6 +6756,22 @@ main(int argc, char *argv[])
 			err(1, "chmod");
 	}
 
+	/* sessions dir */
+	snprintf(sessions_dir, sizeof sessions_dir, "%s/%s/%s",
+	    pwd->pw_dir, XT_DIR, XT_SESSIONS_DIR);
+	if (stat(sessions_dir, &sb)) {
+		if (mkdir(sessions_dir, S_IRWXU) == -1)
+			err(1, "mkdir sessions_dir");
+		if (stat(sessions_dir, &sb))
+			err(1, "stat sessions_dir");
+	}
+	if (S_ISDIR(sb.st_mode) == 0)
+		errx(1, "%s not a dir", sessions_dir);
+	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
+		warnx("fixing invalid permissions on %s", sessions_dir);
+		if (chmod(sessions_dir, S_IRWXU) == -1)
+			err(1, "chmod");
+	}
 	/* runtime settings that can override config file */
 	if (runtime_settings[0] != '\0')
 		config_parse(runtime_settings, 1);
@@ -6299,7 +6848,13 @@ main(int argc, char *argv[])
 	if (save_global_history)
 		restore_global_history();
 
-	focus = restore_saved_tabs();
+	if (!strcmp(named_session, XT_SAVED_TABS_FILE))
+		restore_saved_tabs();
+	else {
+		a.s = named_session;
+		a.i = XT_SES_DONOTHING;
+		open_tabs(NULL, &a);
+	}
 
 	while (argc) {
 		create_new_tab(argv[0], NULL, focus);
@@ -6308,7 +6863,8 @@ main(int argc, char *argv[])
 		argc--;
 		argv++;
 	}
-	if (focus == 1)
+
+	if (TAILQ_EMPTY(&tabs))
 		create_new_tab(home, NULL, 1);
 
 	if (enable_socket)

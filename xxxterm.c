@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.271 2011/01/14 21:23:52 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.274 2011/01/17 01:43:34 stevan Exp $ */
 /*
  * Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2011 Stevan Andjelkovic <stevan@student.chalmers.se>
@@ -41,13 +41,19 @@
 #include <dlfcn.h>
 #include <errno.h>
 
-#ifdef __linux__
-#include "linux/tree.h"
-#else
-#include <sys/tree.h>
+#include <sys/types.h>
+#if defined(__linux__)
+	#include "linux/util.h"
+	#include "linux/tree.h"
+#elif defined(__FreeBSD__)
+	#include <libutil.h>
+	#include "freebsd/util.h"
+	#include <sys/tree.h>
+#else /* OpenBSD */
+	#include <util.h>
+	#include <sys/tree.h>
 #endif
 #include <sys/queue.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -88,7 +94,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.271 2011/01/14 21:23:52 marco Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.274 2011/01/17 01:43:34 stevan Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -1667,6 +1673,8 @@ save_tabs(struct tab *t, struct karg *a)
 	struct tab		*ti;
 	WebKitWebFrame		*frame;
 	const gchar		*uri;
+	int			len = 0, i;
+	gchar			**arr = NULL;
 
 	if (a == NULL)
 		return (1);
@@ -1684,14 +1692,24 @@ save_tabs(struct tab *t, struct karg *a)
 	/* save session name */
 	fprintf(f, "%s%s\n", XT_SAVE_SESSION_ID, named_session);
 
-	/* save tabs */
+	/* save tabs, in the order they are arranged in the notebook */
+	TAILQ_FOREACH(ti, &tabs, entry)
+		len++;
+
+	arr = g_malloc0(len * sizeof(gchar *));
+
 	TAILQ_FOREACH(ti, &tabs, entry) {
 		frame = webkit_web_view_get_main_frame(ti->wv);
 		uri = webkit_web_frame_get_uri(frame);
 		if (uri && strlen(uri) > 0)
-			fprintf(f, "%s\n", uri);
+			arr[gtk_notebook_page_num(notebook, ti->vbox)] = (gchar *)uri;
 	}
 
+	for (i = 0; i < len; i++)
+		if (arr[i])
+			fprintf(f, "%s\n", arr[i]);
+
+	g_free(arr);
 	fclose(f);
 
 	return (0);
@@ -3989,7 +4007,7 @@ session_cmd(struct tab *t, struct karg *args)
 		action = "show";
 
 	if (!strcmp(action, "show"))
-		show_oops(t, "Current session: %s", named_session[0] == '\0' ? 
+		show_oops(t, "Current session: %s", named_session[0] == '\0' ?
 		    XT_SAVED_TABS_FILE : named_session);
 	else if (g_str_has_prefix(action, "save ")) {
 		if (session_save(t, action, &filename)) {

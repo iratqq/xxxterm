@@ -1,4 +1,4 @@
-.\"	$xxxterm: xxxterm.1,v 1.67 2011/01/14 20:03:31 marco Exp $
+.\"	$xxxterm: xxxterm.1,v 1.72 2011/01/17 23:39:55 marco Exp $
 .\"
 .\" Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
 .\" Copyright (c) 2011 Jason McIntyre <jmc@kerhand.co.uk>
@@ -15,7 +15,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: January 14 2011 $
+.Dd $Mdocdate: January 17 2011 $
 .Dt XXXTERM 1
 .Os
 .Sh NAME
@@ -194,9 +194,11 @@ Print page
 .It Cm M-h
 Global history
 .It Cm C-j
-Toggle javascript enabled for domain
+Toggle Java Script enabled for FQDN.
 .It Cm C-s
 Toggle source view
+.It Cm M-c
+Toggle cookie enabled for FQDN.
 .El
 .Ss Tab Manipulation
 .Nm
@@ -285,26 +287,26 @@ Used by itself it expands to
 .Cm cookie show all .
 .It Cm cookies
 Show cookie jar contents.
-.It Cm cookie save
+.It Cm cookie save, cookie save fqdn
+Save the current fully qualified domain name (FQDN)
+to the persistent whitelist.
+For example,
+the www.peereboom.us domain would result in saving .www.peereboom.us.
 .It Cm cookie save domain
-Save the top level domain name to the persitent whitelist.
+Save the top level domain name to the persistent whitelist.
 For example,
 the www.peereboom.us domain would result in saving .peereboom.us.
 .Pp
 This action enables cookies if it is currently disabled for this entry.
-.It Cm cookie save fqdn
-Save the current fully qualified domain name (FQDN)
-to the persitent whitelist.
 .It Cm cookie show all
 Show all persistent and session entries in the cookie whitelist.
 .It Cm cookie show persistent
 Show all persistent entries in the cookie whitelist.
 .It Cm cookie show session
 Show all session entries in the cookie whitelist.
-.It Cm cookie toggle
 .It Cm cookie toggle domain
 Toggle cookie support for the current top level domain.
-.It Cm cookie toggle fqdn
+.It Cm cookie toggle, cookie toggle fqdn
 Toggle Java Script execution for the current FQDN.
 .It Cm dl
 Show download manager.
@@ -326,26 +328,26 @@ The
 command is used to manipulate the Java Script whitelist.
 Used by itself it expands to
 .Cm js show all .
-.It Cm js save
+.It Cm js save, save fqdn
+Saves the FQDN to the persistent whitelist.
+For example,
+the www.peereboom.us domain would result in saving .www.peereboom.us.
 .It Cm js save domain
-Saves the top level domain name to the persitent whitelist.
+Saves the top level domain name to the persistent whitelist.
 For example,
 the www.peereboom.us domain would result in saving .peereboom.us.
 .Pp
 This action enables Java Script if it is currently disabled for this entry.
-.It Cm js save fqdn
-Saves the current FQDN to the persitent whitelist.
 .It Cm js show all
 Shows all persistent and session entries in the JS whitelist.
 .It Cm js show persistent
 Shows all persistent entries in the JS whitelist.
 .It Cm js show session
 Shows all session entries in the JS whitelist.
-.It Cm js toggle
+.It Cm js toggle, js toggle fqdn
+Toggle Java Script execution for the current FQDN.
 .It Cm js toggle domain
 Toggle Java Script execution for the current top level domain.
-.It Cm js toggle fqdn
-Toggle Java Script execution for the current FQDN.
 .It Cm open , op , o URL
 Open URL.
 .It Cm print
@@ -367,7 +369,7 @@ By default the session name is main_session.
 To create a new session use the
 .Cm session save
 command.
-A session is defined as the lifetime of the browser window.
+A session is defined as the lifetime of the browser application.
 .It Cm session delete <session_name>
 Delete session session_name from persistent storage.
 If session_name is the current session then the session will revert to
@@ -411,6 +413,61 @@ The tabs will be restored next time
 the session is opened.
 See the session command for additional details.
 .El
+.Sh WHITELISTS
+.Nm
+has a number of whitelists to control blocking cookies and Java Script
+execution for FQDNs or domains.
+When properly enabled these whitelists require either the FQDN or top level
+domain to exist in the whitelists in order to allow cookies to be stored or
+Java Script to execute.
+Both Java Script and cookies have two whitelists associated with them.
+The whitelists are called session and persistent.
+Items in the session whitelists are only allowed for the lifetime of the
+.Nm
+instance.
+Items in the persistent whitelists are stored on disk and are restored
+upon restarting.
+.Pp
+Setting up the whitelists is a little tricky due to intricacies of WebKit.
+In fact the semantics are different for cookies and Java Script.
+.Pp
+Cookie whitelist requires the following configuration to be set:
+.Bl -tag -width "enable_cookie_whitelistXXX" -offset indent -compact
+.It Cm cookies_enabled
+This is a WebKit setting and must be set to
+.Pa 1 (ENABLED)
+in order to be able to use a
+cookie whitelist.
+.It Cm enable_cookie_whitelist
+This needs to be set to
+.Pa 1
+to enable the cookie whitelist functionality.
+.It Cm cookie_wl
+These entries in the configuration file are the actual domains names in the
+cookie whitelist.
+.El
+.Pp
+Java Script whitelist requires the following configuration to be set:
+.Bl -tag -width "enable_js_whitelistXXX" -offset indent -compact
+.It Cm enable_scripts
+This is a WebKit setting and must be set to
+.Pa 0 (DISABLED)
+in order to be able to use a
+Java Script whitelist.
+.It Cm enable_js_whitelist
+This needs to be set to
+.Pa 1
+to enable the Java Script whitelist functionality.
+.It Cm js_wl
+These entries in the configuration file are the actual domains names in the
+Java Script whitelist.
+.El
+.Pp
+See the
+.Pa FILES
+section for additional configuration file entries and details
+that alter runtime behavior.
+.PP
 .Sh FILES
 .Bl -tag -width "/etc/xxxterm.confXXX" -compact
 .It Pa ~/.xxxterm.conf
@@ -489,7 +546,7 @@ validates that during startup.
 .It Cm enable_cookie_whitelist
 When enabled all cookies must be in the whitelist or they are rejected.
 .It Cm enable_js_whitelist
-When enabled all domains must be in the js whitelist in order to run javascript.
+When enabled all domains must be in the js whitelist in order to run Java Script.
 NOTE: Make sure
 .Cm enable_scripts
 is set to 0.
@@ -529,7 +586,7 @@ Permits icon sizes to be changed if
 is enabled.
 Size 1 is small; 2 is normal; 3 through 6 are progressively larger.
 .It Cm js_wl
-This is a javascript whitelist item.
+This is a Java Script whitelist item.
 See
 .Cm cookie_wl
 for semantics and more details.
@@ -578,10 +635,7 @@ and
 .Cm session open
 commands.
 .It Cm session_timeout
-If this value is greater than 3600 then it is the time added in seconds to a
-session cookie.
-If the value is smaller than 3600 then there is no change
-to the expiration of a session cookie.
+This value is the time that is added in seconds to a session cookie.
 .It Cm show_tabs
 Enable or disable showing tabs.
 .It Cm show_url
@@ -599,6 +653,10 @@ If set to a valid PEM file
 all server certificates will be validated against it.
 The URL bar will be colored green when the certificate is trusted
 and yellow when untrusted.
+.Pp
+If
+.Cm ssl_ca_file
+is not set then the URL bar will color all HTTPS connections red.
 .It Cm ssl_strict_certs
 If this value is set connections to untrusted sites will be aborted.
 This value is only used if
@@ -612,9 +670,6 @@ user-agent string.
 Set the default height of the browser window.
 .It Cm window_width
 Set the default width of the browser window.
-If
-.Cm ssl_ca_file
-is not set then the URL bar will color all HTTPS connections red.
 .El
 .Sh HISTORY
 .Nm

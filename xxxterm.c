@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.276 2011/01/18 00:28:13 stevan Exp $ */
+/* $xxxterm: xxxterm.c,v 1.280 2011/01/19 04:18:04 todd Exp $ */
 /*
  * Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2011 Stevan Andjelkovic <stevan@student.chalmers.se>
@@ -36,7 +36,6 @@
 #include <pwd.h>
 #include <string.h>
 #include <unistd.h>
-#include <util.h>
 #include <pthread.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -94,7 +93,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.276 2011/01/18 00:28:13 stevan Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.280 2011/01/19 04:18:04 todd Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -414,6 +413,7 @@ int		show_tabs = 1;	/* show tabs on notebook */
 int		show_url = 1;	/* show url toolbar on notebook */
 int		tabless = 0;	/* allow only 1 tab */
 int		enable_socket = 0;
+int		socket_fd = -1;
 int		single_instance = 0; /* only allow one xxxterm to run */
 int		fancy_bar = 1;	/* fancy toolbar */
 
@@ -1880,7 +1880,7 @@ toggle_js(struct tab *t, struct karg *args)
 	if (args == NULL)
 		return (0);
 
-	g_object_get((GObject *)t->settings,
+	g_object_get(G_OBJECT(t->settings),
 	    "enable-scripts", &es, (char *)NULL);
 	if (args->i & XT_WL_TOGGLE)
 		es = !es;
@@ -1913,7 +1913,7 @@ toggle_js(struct tab *t, struct karg *args)
 			RB_REMOVE(domain_list, &js_wl, d);
 		button_set_stockid(t->js_toggle, GTK_STOCK_MEDIA_PAUSE);
 	}
-	g_object_set((GObject *)t->settings,
+	g_object_set(G_OBJECT(t->settings),
 	    "enable-scripts", es, (char *)NULL);
 	webkit_web_view_set_settings(t->wv, t->settings);
 	webkit_web_view_reload(t->wv);
@@ -4072,6 +4072,9 @@ restart(struct tab *t, struct karg *args)
 
 	a.s = XT_RESTART_TABS_FILE;
 	save_tabs(t, &a);
+
+	if (enable_socket && socket_fd != -1)
+		close(socket_fd);
 	execvp(start_argv[0], start_argv);
 	/* NOTREACHED */
 
@@ -4624,7 +4627,7 @@ check_and_set_js(gchar *uri, struct tab *t)
 	DNPRINTF(XT_D_JS, "check_and_set_js: %s %s\n",
 	    es ? "enable" : "disable", uri);
 
-	g_object_set((GObject *)t->settings,
+	g_object_set(G_OBJECT(t->settings),
 	    "enable-scripts", es, (char *)NULL);
 	webkit_web_view_set_settings(t->wv, t->settings);
 
@@ -5644,24 +5647,24 @@ stop_cb(GtkWidget *w, struct tab *t)
 void
 setup_webkit(struct tab *t)
 {
-	g_object_set((GObject *)t->settings,
+	g_object_set(G_OBJECT(t->settings),
 	    "user-agent", t->user_agent, (char *)NULL);
-	g_object_set((GObject *)t->settings,
+	g_object_set(G_OBJECT(t->settings),
 	    "enable-scripts", enable_scripts, (char *)NULL);
-	g_object_set((GObject *)t->settings,
+	g_object_set(G_OBJECT(t->settings),
 	    "enable-plugins", enable_plugins, (char *)NULL);
 	adjustfont_webkit(t, XT_FONT_SET);
-	g_object_set((GObject *)t->settings,
+	g_object_set(G_OBJECT(t->settings),
 	    "default-font-family", default_font_family, (char *)NULL);
-	g_object_set((GObject *)t->settings,
+	g_object_set(G_OBJECT(t->settings),
 	    "serif-font-family", serif_font_family, (char *)NULL);
-	g_object_set((GObject *)t->settings,
+	g_object_set(G_OBJECT(t->settings),
 	    "sans-serif-font-family", sans_serif_font_family, (char *)NULL);
-	g_object_set((GObject *)t->settings,
+	g_object_set(G_OBJECT(t->settings),
 	    "monospace-font-family", monospace_font_family, (char *)NULL);
-	g_object_set((GObject *)t->settings,
+	g_object_set(G_OBJECT(t->settings),
 	    "default-encoding", default_encoding, (char *)NULL);
-	g_object_set((GObject *)t->settings,
+	g_object_set(G_OBJECT(t->settings),
 	    "user-stylesheet-uri", user_stylesheet, (char *)NULL);
 
 	webkit_web_view_set_settings(t->wv, t->settings);
@@ -5692,7 +5695,7 @@ create_browser(struct tab *t)
 	t->settings = webkit_web_settings_new();
 
 	if (user_agent == NULL) {
-		g_object_get((GObject *)t->settings, "user-agent", &strval,
+		g_object_get(G_OBJECT(t->settings), "user-agent", &strval,
 		    (char *)NULL);
 		t->user_agent = g_strdup_printf("%s %s+", strval, version);
 		g_free(strval);
@@ -5913,9 +5916,9 @@ adjustfont_webkit(struct tab *t, int adjust)
 		t->font_size = default_font_size;
 
 	t->font_size += adjust;
-	g_object_set((GObject *)t->settings, "default-font-size",
+	g_object_set(G_OBJECT(t->settings), "default-font-size",
 	    t->font_size, (char *)NULL);
-	g_object_get((GObject *)t->settings, "default-font-size",
+	g_object_get(G_OBJECT(t->settings), "default-font-size",
 	    &t->font_size, (char *)NULL);
 }
 
@@ -6038,7 +6041,7 @@ create_new_tab(char *title, struct undo *u, int focus)
 	/* make notebook tabs reorderable */
 	gtk_notebook_set_tab_reorderable(notebook, t->vbox, TRUE);
 
-	g_object_connect((GObject*)t->cmd,
+	g_object_connect(G_OBJECT(t->cmd),
 	    "signal::key-press-event", (GCallback)cmd_keypress_cb, t,
 	    "signal::key-release-event", (GCallback)cmd_keyrelease_cb, t,
 	    "signal::focus-out-event", (GCallback)cmd_focusout_cb, t,
@@ -6046,11 +6049,11 @@ create_new_tab(char *title, struct undo *u, int focus)
 	    (char *)NULL);
 
 	/* reuse wv_button_cb to hide oops */
-	g_object_connect((GObject*)t->oops,
+	g_object_connect(G_OBJECT(t->oops),
 	    "signal::button_press_event", (GCallback)wv_button_cb, t,
 	    (char *)NULL);
 
-	g_object_connect((GObject*)t->wv,
+	g_object_connect(G_OBJECT(t->wv),
 	    "signal::key-press-event", (GCallback)wv_keypress_cb, t,
 	    "signal-after::key-press-event", (GCallback)wv_keypress_after_cb, t,
 	    /* "signal::hovering-over-link", (GCallback)webview_hover_cb, t, */
@@ -6071,7 +6074,7 @@ create_new_tab(char *title, struct undo *u, int focus)
 	    "notify::load-status", G_CALLBACK(notify_load_status_cb), t);
 
 	/* hijack the unused keys as if we were the browser */
-	g_object_connect((GObject*)t->toolbar,
+	g_object_connect(G_OBJECT(t->toolbar),
 	    "signal-after::key-press-event", (GCallback)wv_keypress_after_cb, t,
 	    (char *)NULL);
 
@@ -6279,7 +6282,7 @@ create_canvas(void)
 	gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(notebook), TRUE, TRUE, 0);
 	gtk_widget_set_size_request(vbox, -1, -1);
 
-	g_object_connect((GObject*)notebook,
+	g_object_connect(G_OBJECT(notebook),
 	    "signal::switch-page", (GCallback)notebook_switchpage_cb, NULL,
 	    (char *)NULL);
 	g_signal_connect(G_OBJECT(abtn), "button_press_event",
@@ -6637,6 +6640,30 @@ done:
 }
 
 void
+create_dir(char **pathptr, int size, const char *dirname, const char *name)
+{
+	struct stat	sb;
+	char 		*path = pathptr;
+
+	if (path[0] == '\0')
+		snprintf(path, size, "%s/%s", pwd->pw_dir,
+		    XT_DIR);
+	if (stat(path, &sb)) {
+		if (mkdir(path, S_IRWXU) == -1)
+			err(1, "mkdir %s(%s)", name, path);
+		if (stat(path, &sb))
+			err(1, "stat %s(%s)", name, path);
+	}
+	if (S_ISDIR(sb.st_mode) == 0)
+		errx(1, "%s(%s) not a dir", name, path);
+	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
+		warnx("fixing invalid permissions on %s(%s)", name, path);
+		if (chmod(path, S_IRWXU) == -1)
+			err(1, "chmod");
+	}
+}
+
+void
 usage(void)
 {
 	fprintf(stderr,
@@ -6730,91 +6757,27 @@ main(int argc, char *argv[])
 	config_parse(conf, 0);
 
 	/* working directory */
-	snprintf(work_dir, sizeof work_dir, "%s/%s", pwd->pw_dir, XT_DIR);
-	if (stat(work_dir, &sb)) {
-		if (mkdir(work_dir, S_IRWXU) == -1)
-			err(1, "mkdir work_dir");
-		if (stat(work_dir, &sb))
-			err(1, "stat work_dir");
-	}
-	if (S_ISDIR(sb.st_mode) == 0)
-		errx(1, "%s not a dir", work_dir);
-	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
-		warnx("fixing invalid permissions on %s", work_dir);
-		if (chmod(work_dir, S_IRWXU) == -1)
-			err(1, "chmod");
-	}
+	create_dir(&work_dir, sizeof work_dir, XT_DIR, "work_dir");
 
 	/* icon cache dir */
-	snprintf(cache_dir, sizeof cache_dir, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_CACHE_DIR);
-	if (stat(cache_dir, &sb)) {
-		if (mkdir(cache_dir, S_IRWXU) == -1)
-			err(1, "mkdir cache_dir");
-		if (stat(cache_dir, &sb))
-			err(1, "stat cache_dir");
-	}
-	if (S_ISDIR(sb.st_mode) == 0)
-		errx(1, "%s not a dir", cache_dir);
-	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
-		warnx("fixing invalid permissions on %s", cache_dir);
-		if (chmod(cache_dir, S_IRWXU) == -1)
-			err(1, "chmod");
-	}
+	create_dir(&cache_dir, sizeof cache_dir, XT_CACHE_DIR, "cache_dir");
 
 	/* certs dir */
-	snprintf(certs_dir, sizeof certs_dir, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_CERT_DIR);
-	if (stat(certs_dir, &sb)) {
-		if (mkdir(certs_dir, S_IRWXU) == -1)
-			err(1, "mkdir certs_dir");
-		if (stat(certs_dir, &sb))
-			err(1, "stat certs_dir");
-	}
-	if (S_ISDIR(sb.st_mode) == 0)
-		errx(1, "%s not a dir", certs_dir);
-	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
-		warnx("fixing invalid permissions on %s", certs_dir);
-		if (chmod(certs_dir, S_IRWXU) == -1)
-			err(1, "chmod");
-	}
+	create_dir(&certs_dir, sizeof certs_dir, XT_CERT_DIR, "certs_dir");
 
 	/* sessions dir */
-	snprintf(sessions_dir, sizeof sessions_dir, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_SESSIONS_DIR);
-	if (stat(sessions_dir, &sb)) {
-		if (mkdir(sessions_dir, S_IRWXU) == -1)
-			err(1, "mkdir sessions_dir");
-		if (stat(sessions_dir, &sb))
-			err(1, "stat sessions_dir");
-	}
-	if (S_ISDIR(sb.st_mode) == 0)
-		errx(1, "%s not a dir", sessions_dir);
-	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
-		warnx("fixing invalid permissions on %s", sessions_dir);
-		if (chmod(sessions_dir, S_IRWXU) == -1)
-			err(1, "chmod");
-	}
+	create_dir(&sessions_dir, sizeof sessions_dir, XT_SESSIONS_DIR,
+	    "sessions_dir");
+
 	/* runtime settings that can override config file */
 	if (runtime_settings[0] != '\0')
 		config_parse(runtime_settings, 1);
 
 	/* download dir */
 	if (!strcmp(download_dir, pwd->pw_dir))
-		strlcat(download_dir, "/downloads", sizeof download_dir);
-	if (stat(download_dir, &sb)) {
-		if (mkdir(download_dir, S_IRWXU) == -1)
-			err(1, "mkdir download_dir");
-		if (stat(download_dir, &sb))
-			err(1, "stat download_dir");
-	}
-	if (S_ISDIR(sb.st_mode) == 0)
-		errx(1, "%s not a dir", download_dir);
-	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
-		warnx("fixing invalid permissions on %s", download_dir);
-		if (chmod(download_dir, S_IRWXU) == -1)
-			err(1, "chmod");
-	}
+		download_dir[0] = '\0';
+	create_dir(&download_dir, sizeof download_dir, "downloads",
+	    "download_dir");
 
 	/* favorites file */
 	snprintf(file, sizeof file, "%s/%s", work_dir, XT_FAVS_FILE);
@@ -6891,8 +6854,10 @@ main(int argc, char *argv[])
 		create_new_tab(home, NULL, 1);
 
 	if (enable_socket)
-		if ((s = build_socket()) != -1)
+		if ((s = build_socket()) != -1) {
+			socket_fd = s;
 			gdk_input_add(s, GDK_INPUT_READ, socket_watcher, NULL);
+		}
 
 	gtk_main();
 

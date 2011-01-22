@@ -1,4 +1,4 @@
-# $xxxterm: Makefile,v 1.3 2011/01/17 21:40:52 stevan Exp $
+# $xxxterm: Makefile,v 1.4 2011/01/19 16:19:40 marco Exp $
 
 LIBS= gtk+-2.0 webkit-1.0 libsoup-2.4
 
@@ -11,7 +11,7 @@ LDFLAGS+= $(GTK_LDFLAGS) -pthread
 PREFIX?= /usr/local
 BINDIR?= $(PREFIX)/bin
 LIBDIR?= $(PREFIX)/lib
-MANDIR?= $(PREFIX)/share/man
+MANDIR?= $(PREFIX)/man
 
 CC?= cc
 

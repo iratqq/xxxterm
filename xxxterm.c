@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.280 2011/01/19 04:18:04 todd Exp $ */
+/* $xxxterm: xxxterm.c,v 1.282 2011/01/21 21:59:34 marco Exp $ */
 /*
  * Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2011 Stevan Andjelkovic <stevan@student.chalmers.se>
@@ -39,8 +39,10 @@
 #include <pthread.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <signal.h>
 
 #include <sys/types.h>
+#include <sys/wait.h>
 #if defined(__linux__)
 	#include "linux/util.h"
 	#include "linux/tree.h"
@@ -93,7 +95,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.280 2011/01/19 04:18:04 todd Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.282 2011/01/21 21:59:34 marco Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -413,7 +415,6 @@ int		show_tabs = 1;	/* show tabs on notebook */
 int		show_url = 1;	/* show url toolbar on notebook */
 int		tabless = 0;	/* allow only 1 tab */
 int		enable_socket = 0;
-int		socket_fd = -1;
 int		single_instance = 0; /* only allow one xxxterm to run */
 int		fancy_bar = 1;	/* fancy toolbar */
 
@@ -598,6 +599,43 @@ uint64_t		blocked_cookies = 0;
 char			named_session[PATH_MAX];
 void			update_favicon(struct tab *);
 int			icon_size_map(int);
+
+void
+sigchild(int sig)
+{
+	int			saved_errno, status;
+	pid_t			pid;
+
+	saved_errno = errno;
+
+	while ((pid = waitpid(WAIT_ANY, &status, WNOHANG)) != 0) {
+		if (pid == -1) {
+			if (errno == EINTR)
+				continue;
+			if (errno != ECHILD) {
+				/*
+				clog_warn("sigchild: waitpid:");
+				*/
+			}
+			break;
+		}
+
+		if (WIFEXITED(status)) {
+			if (WEXITSTATUS(status) != 0) {
+				/*
+				clog_warnx("sigchild: child exit status: %d",
+				    WEXITSTATUS(status));
+				*/
+			}
+		} else {
+			/*
+			clog_warnx("sigchild: child is terminated abnormally");
+			*/
+		}
+	}
+
+	errno = saved_errno;
+}
 
 void
 load_webkit_string(struct tab *t, const char *str)
@@ -4072,9 +4110,6 @@ restart(struct tab *t, struct karg *args)
 
 	a.s = XT_RESTART_TABS_FILE;
 	save_tabs(t, &a);
-
-	if (enable_socket && socket_fd != -1)
-		close(socket_fd);
 	execvp(start_argv[0], start_argv);
 	/* NOTREACHED */
 
@@ -6640,30 +6675,6 @@ done:
 }
 
 void
-create_dir(char **pathptr, int size, const char *dirname, const char *name)
-{
-	struct stat	sb;
-	char 		*path = pathptr;
-
-	if (path[0] == '\0')
-		snprintf(path, size, "%s/%s", pwd->pw_dir,
-		    XT_DIR);
-	if (stat(path, &sb)) {
-		if (mkdir(path, S_IRWXU) == -1)
-			err(1, "mkdir %s(%s)", name, path);
-		if (stat(path, &sb))
-			err(1, "stat %s(%s)", name, path);
-	}
-	if (S_ISDIR(sb.st_mode) == 0)
-		errx(1, "%s(%s) not a dir", name, path);
-	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
-		warnx("fixing invalid permissions on %s(%s)", name, path);
-		if (chmod(path, S_IRWXU) == -1)
-			err(1, "chmod");
-	}
-}
-
-void
 usage(void)
 {
 	fprintf(stderr,
@@ -6681,6 +6692,7 @@ main(int argc, char *argv[])
 	char			*env_proxy = NULL;
 	FILE			*f = NULL;
 	struct karg		a;
+	struct sigaction	sact;
 
 	start_argv = argv;
 
@@ -6738,11 +6750,17 @@ main(int argc, char *argv[])
 	if (!g_thread_supported())
 		g_thread_init(NULL);
 
+	/* signals */
+	bzero(&sact, sizeof(sact));
+	sigemptyset(&sact.sa_mask);
+	sact.sa_handler = sigchild;
+	sact.sa_flags = SA_NOCLDSTOP;
+	sigaction(SIGCHLD, &sact, NULL);
+
+	/* set download dir */
 	pwd = getpwuid(getuid());
 	if (pwd == NULL)
 		errx(1, "invalid user %d", getuid());
-
-	/* set download dir */
 	strlcpy(download_dir, pwd->pw_dir, sizeof download_dir);
 
 	/* set default string settings */
@@ -6757,27 +6775,91 @@ main(int argc, char *argv[])
 	config_parse(conf, 0);
 
 	/* working directory */
-	create_dir(&work_dir, sizeof work_dir, XT_DIR, "work_dir");
+	snprintf(work_dir, sizeof work_dir, "%s/%s", pwd->pw_dir, XT_DIR);
+	if (stat(work_dir, &sb)) {
+		if (mkdir(work_dir, S_IRWXU) == -1)
+			err(1, "mkdir work_dir");
+		if (stat(work_dir, &sb))
+			err(1, "stat work_dir");
+	}
+	if (S_ISDIR(sb.st_mode) == 0)
+		errx(1, "%s not a dir", work_dir);
+	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
+		warnx("fixing invalid permissions on %s", work_dir);
+		if (chmod(work_dir, S_IRWXU) == -1)
+			err(1, "chmod");
+	}
 
 	/* icon cache dir */
-	create_dir(&cache_dir, sizeof cache_dir, XT_CACHE_DIR, "cache_dir");
+	snprintf(cache_dir, sizeof cache_dir, "%s/%s/%s",
+	    pwd->pw_dir, XT_DIR, XT_CACHE_DIR);
+	if (stat(cache_dir, &sb)) {
+		if (mkdir(cache_dir, S_IRWXU) == -1)
+			err(1, "mkdir cache_dir");
+		if (stat(cache_dir, &sb))
+			err(1, "stat cache_dir");
+	}
+	if (S_ISDIR(sb.st_mode) == 0)
+		errx(1, "%s not a dir", cache_dir);
+	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
+		warnx("fixing invalid permissions on %s", cache_dir);
+		if (chmod(cache_dir, S_IRWXU) == -1)
+			err(1, "chmod");
+	}
 
 	/* certs dir */
-	create_dir(&certs_dir, sizeof certs_dir, XT_CERT_DIR, "certs_dir");
+	snprintf(certs_dir, sizeof certs_dir, "%s/%s/%s",
+	    pwd->pw_dir, XT_DIR, XT_CERT_DIR);
+	if (stat(certs_dir, &sb)) {
+		if (mkdir(certs_dir, S_IRWXU) == -1)
+			err(1, "mkdir certs_dir");
+		if (stat(certs_dir, &sb))
+			err(1, "stat certs_dir");
+	}
+	if (S_ISDIR(sb.st_mode) == 0)
+		errx(1, "%s not a dir", certs_dir);
+	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
+		warnx("fixing invalid permissions on %s", certs_dir);
+		if (chmod(certs_dir, S_IRWXU) == -1)
+			err(1, "chmod");
+	}
 
 	/* sessions dir */
-	create_dir(&sessions_dir, sizeof sessions_dir, XT_SESSIONS_DIR,
-	    "sessions_dir");
-
+	snprintf(sessions_dir, sizeof sessions_dir, "%s/%s/%s",
+	    pwd->pw_dir, XT_DIR, XT_SESSIONS_DIR);
+	if (stat(sessions_dir, &sb)) {
+		if (mkdir(sessions_dir, S_IRWXU) == -1)
+			err(1, "mkdir sessions_dir");
+		if (stat(sessions_dir, &sb))
+			err(1, "stat sessions_dir");
+	}
+	if (S_ISDIR(sb.st_mode) == 0)
+		errx(1, "%s not a dir", sessions_dir);
+	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
+		warnx("fixing invalid permissions on %s", sessions_dir);
+		if (chmod(sessions_dir, S_IRWXU) == -1)
+			err(1, "chmod");
+	}
 	/* runtime settings that can override config file */
 	if (runtime_settings[0] != '\0')
 		config_parse(runtime_settings, 1);
 
 	/* download dir */
 	if (!strcmp(download_dir, pwd->pw_dir))
-		download_dir[0] = '\0';
-	create_dir(&download_dir, sizeof download_dir, "downloads",
-	    "download_dir");
+		strlcat(download_dir, "/downloads", sizeof download_dir);
+	if (stat(download_dir, &sb)) {
+		if (mkdir(download_dir, S_IRWXU) == -1)
+			err(1, "mkdir download_dir");
+		if (stat(download_dir, &sb))
+			err(1, "stat download_dir");
+	}
+	if (S_ISDIR(sb.st_mode) == 0)
+		errx(1, "%s not a dir", download_dir);
+	if (((sb.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO))) != S_IRWXU) {
+		warnx("fixing invalid permissions on %s", download_dir);
+		if (chmod(download_dir, S_IRWXU) == -1)
+			err(1, "chmod");
+	}
 
 	/* favorites file */
 	snprintf(file, sizeof file, "%s/%s", work_dir, XT_FAVS_FILE);
@@ -6854,10 +6936,8 @@ main(int argc, char *argv[])
 		create_new_tab(home, NULL, 1);
 
 	if (enable_socket)
-		if ((s = build_socket()) != -1) {
-			socket_fd = s;
+		if ((s = build_socket()) != -1)
 			gdk_input_add(s, GDK_INPUT_READ, socket_watcher, NULL);
-		}
 
 	gtk_main();
 

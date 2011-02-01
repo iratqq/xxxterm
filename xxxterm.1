@@ -1,4 +1,4 @@
-.\"	$xxxterm: xxxterm.1,v 1.73 2011/01/27 18:08:41 vext01 Exp $
+.\"	$xxxterm: xxxterm.1,v 1.75 2011/02/01 14:40:58 marco Exp $
 .\"
 .\" Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
 .\" Copyright (c) 2011 Jason McIntyre <jmc@kerhand.co.uk>
@@ -15,7 +15,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: January 27 2011 $
+.Dd $Mdocdate: February 1 2011 $
 .Dt XXXTERM 1
 .Os
 .Sh NAME
@@ -26,6 +26,7 @@
 .Bk -words
 .Op Fl nSTtV
 .Op Fl f Ar file
+.Op Fl s Ar session_name
 .Op Ar url ...
 .Ek
 .Sh DESCRIPTION
@@ -54,6 +55,8 @@ The options are as follows:
 Specify an alternative configuration file.
 .It Fl S
 Disable the toolbar.
+.It Fl s Ar session_name
+Open session that was saved with ":session save" command.
 .It Fl T
 Disable visualization of tabs.
 .It Fl t
@@ -399,9 +402,13 @@ Go to the previous tab.
 .It Cm tabshow , tabs
 Show tabs.
 .It Cm urlhide , urlh
-Hide url entry and toolbar.
+Hide url entry and tool bar.
 .It Cm urlshow , urls
-Show url entry and toolbar.
+Show url entry and tool bar.
+.It Cm statushide , statush
+Hide status bar.
+.It Cm statusshow , statuss
+Show status bar.
 .It Cm w
 Save open tabs to current session.
 The tabs will be restored next time
@@ -642,6 +649,8 @@ This value is the time that is added in seconds to a session cookie.
 Enable or disable showing tabs.
 .It Cm show_url
 Enable or disable showing the url and toolbar.
+.It Cm show_statusbar
+Enable or disable showing the status bar.
 .It Cm single_instance
 If set only one
 .Nm

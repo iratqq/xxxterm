@@ -1,4 +1,4 @@
-.\"	$xxxterm: xxxterm.1,v 1.75 2011/02/01 14:40:58 marco Exp $
+.\"	$xxxterm: xxxterm.1,v 1.79 2011/02/02 02:10:10 stevan Exp $
 .\"
 .\" Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
 .\" Copyright (c) 2011 Jason McIntyre <jmc@kerhand.co.uk>
@@ -15,7 +15,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: February 1 2011 $
+.Dd $Mdocdate: February 2 2011 $
 .Dt XXXTERM 1
 .Os
 .Sh NAME
@@ -262,7 +262,7 @@ Highlight all links and prefix them with a number.
 Commands to exit the browser.
 .Pp
 .Bl -tag -width Ds -offset indent -compact
-.It Cm C-Q
+.It Cm C-q
 Quit
 .El
 .Sh COMMAND MODE
@@ -389,6 +389,10 @@ session_name.
 .It Cm stats
 Show blocked cookie statistics.
 These statistics vary based on settings and are not persistent.
+.It Cm statushide , statush
+Hide status bar.
+.It Cm statusshow , statuss
+Show status bar.
 .It Cm tabclose , tabc
 Close current tab.
 .It Cm tabhide , tabh
@@ -405,10 +409,6 @@ Show tabs.
 Hide url entry and tool bar.
 .It Cm urlshow , urls
 Show url entry and tool bar.
-.It Cm statushide , statush
-Hide status bar.
-.It Cm statusshow , statuss
-Show status bar.
 .It Cm w
 Save open tabs to current session.
 The tabs will be restored next time
@@ -519,6 +519,36 @@ Unfortunately enabling this does allow for some limited tracking on the web.
 .It Cm append_next
 When set a new tab is appended after the current tab instead of being appended
 as the last tab.
+.It Cm browser_mode
+The
+.Nm
+browser has 2 default operating modes:
+.Pa normal
+(the default) or
+.Pa whitelist.
+In the
+.Pa normal
+mode the browser allows all cookies and Java Script as any other browser
+would.
+This means that all cookies are saved to persistent storage and that all
+Java Script runs.
+.Pp
+On the other hand, using the
+.Pa whitelist
+mode enables whitelists.
+This requires the user to add all the required
+.Pa cookie_wl
+and
+.Pa js_wl
+items.
+If a domain does not appear in the whitelists
+.Nm
+disallows cookies and Java Script execution.
+.Pp
+This setting must be the first entry in
+.Pa ~/.xxxterm.conf
+because it sets advanced settings that can be overridden later in the file.
+See the default config file for more details.
 .It Cm cookie_policy
 This field delineates the cookie policy.
 Possible values are: no3rdparty, reject 3rd party cookies.
@@ -578,6 +608,16 @@ Enables a backward, forward, and stop button to the toolbar.
 Additionally if
 .Cm search_string
 is set it'll enable an entry box for searches.
+.It Cm guess_search
+When enabled
+.Nm
+will try to guess if the string you entered, in the URI entry widget or
+the command widget, is term you want to search for using search_string
+(see above). If the string does not contain a dot nor a slash, is not a
+path to a local file and does not resolves to an IP then it is assumed
+to be a search term.
+.It Cm home
+Homepage in URL format.
 .It Cm http_proxy
 Proxy server in URL format.
 .Nm

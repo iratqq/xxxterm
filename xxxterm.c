@@ -1091,7 +1091,12 @@ guess_domainname(char *input)
 			}
 		}
 	}
+
 	free(str);
+
+	if (gethostbyname(input) == NULL)
+		ret = 0;
+
 	return ret;
 }
 

@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.307 2011/02/03 22:34:16 marco Exp $ */
+/* $xxxterm: xxxterm.c,v 1.314 2011/02/09 10:12:55 stevan Exp $ */
 /*
  * Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2011 Stevan Andjelkovic <stevan@student.chalmers.se>
@@ -97,7 +97,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.307 2011/02/03 22:34:16 marco Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.314 2011/02/09 10:12:55 stevan Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -282,8 +282,8 @@ struct karg {
 				"th {background-color: #cccccc;"	\
 				"  border: 1px solid black}"		\
 				"table {border-spacing: 0; "		\
-				"  width: 90%%; border: 1px black"	\
-				" solid; table-layout: fixed}\n"	\
+				"  width: 90%%;"			\
+				"  border: 1px black solid;}\n"		\
 				".progress-outer{"			\
 				"  border: 1px solid black;"		\
 				"  height: 8px;"			\
@@ -418,6 +418,7 @@ struct karg {
 #define XT_STATUS_NOTHING	(0)
 #define XT_STATUS_LINK		(1)
 #define XT_STATUS_URI		(2)
+#define XT_STATUS_LOADING	(3)
 
 #define XT_SES_DONOTHING	(0)
 #define XT_SES_CLOSETABS	(1)
@@ -709,6 +710,11 @@ set_status(struct tab *t, gchar *s, int status)
 		return;
 
 	switch (status) {
+	case XT_STATUS_LOADING:
+		gtk_entry_set_text(GTK_ENTRY(t->uri_entry), s);
+		type = g_strdup_printf("Loading: %s", s);
+		s = type;
+		break;
 	case XT_STATUS_LINK:
 		type = g_strdup_printf("Link: %s", s);
 		if (!t->status)
@@ -1210,7 +1216,7 @@ guess_url_type(char *url_in)
 }
 
 void
-load_uri(WebKitWebView *wv, gchar *uri)
+load_uri(struct tab *t, gchar *uri)
 {
 	gchar		*newuri = NULL;
 
@@ -1229,10 +1235,26 @@ load_uri(WebKitWebView *wv, gchar *uri)
 		uri = newuri;
 	}
 
-	webkit_web_view_load_uri(wv, uri);
+	set_status(t, (char *)uri, XT_STATUS_LOADING);
+	webkit_web_view_load_uri(t->wv, uri);
 
 	if (newuri)
 		g_free(newuri);
+}
+
+const gchar *
+get_uri(WebKitWebView *wv)
+{
+	WebKitWebFrame		*frame;
+	const gchar		*uri;
+
+	frame = webkit_web_view_get_main_frame(wv);
+	uri = webkit_web_frame_get_uri(frame);
+
+	if (uri && strlen(uri) > 0)
+		return (uri);
+	else
+		return (NULL);
 }
 
 int
@@ -1585,7 +1607,7 @@ config_parse(char *filename, int runtime)
 		}
 
 		if ((var = strsep(&cp, WS)) == NULL || cp == NULL)
-			break;
+			errx(1, "invalid config file entry: %s", line);
 
 		cp += (long)strspn(cp, WS);
 
@@ -1934,10 +1956,9 @@ save_tabs(struct tab *t, struct karg *a)
 	char			file[PATH_MAX];
 	FILE			*f;
 	struct tab		*ti;
-	WebKitWebFrame		*frame;
 	const gchar		*uri;
 	int			len = 0, i;
-	gchar			**arr = NULL;
+	const gchar		**arr = NULL;
 
 	if (a == NULL)
 		return (1);
@@ -1962,10 +1983,8 @@ save_tabs(struct tab *t, struct karg *a)
 	arr = g_malloc0(len * sizeof(gchar *));
 
 	TAILQ_FOREACH(ti, &tabs, entry) {
-		frame = webkit_web_view_get_main_frame(ti->wv);
-		uri = webkit_web_frame_get_uri(frame);
-		if (uri && strlen(uri) > 0)
-			arr[gtk_notebook_page_num(notebook, ti->vbox)] = (gchar *)uri;
+		if ((uri = get_uri(ti->wv)) != NULL)
+			arr[gtk_notebook_page_num(notebook, ti->vbox)] = uri;
 	}
 
 	for (i = 0; i < len; i++)
@@ -1993,13 +2012,10 @@ save_tabs_and_quit(struct tab *t, struct karg *args)
 int
 yank_uri(struct tab *t, struct karg *args)
 {
-	WebKitWebFrame		*frame;
 	const gchar		*uri;
 	GtkClipboard		*clipboard;
 
-	frame = webkit_web_view_get_main_frame(t->wv);
-	uri = webkit_web_frame_get_uri(frame);
-	if (!uri)
+	if ((uri = get_uri(t->wv)) == NULL)
 		return (1);
 
 	clipboard = gtk_clipboard_get(GDK_SELECTION_PRIMARY);
@@ -2025,7 +2041,7 @@ paste_uri_cb(GtkClipboard *clipboard, const gchar *text, gpointer data)
 
 	switch(pap->i) {
 	case XT_PASTE_CURRENT_TAB:
-		load_uri(pap->t->wv, (gchar *)text);
+		load_uri(pap->t, (gchar *)text);
 		break;
 	case XT_PASTE_NEW_TAB:
 		create_new_tab((gchar *)text, NULL, 1);
@@ -2053,7 +2069,7 @@ paste_uri(struct tab *t, struct karg *args)
 }
 
 char *
-find_domain(const char *s, int add_dot)
+find_domain(const gchar *s, int add_dot)
 {
 	int			i;
 	char			*r = NULL, *ss = NULL;
@@ -2088,17 +2104,17 @@ find_domain(const char *s, int add_dot)
 int
 toggle_cwl(struct tab *t, struct karg *args)
 {
-	WebKitWebFrame		*frame;
 	struct domain		*d;
-	char			*uri;
+	const gchar		*uri;
 	char			*dom = NULL, *dom_toggle = NULL;
 	int			es;
 
 	if (args == NULL)
-		return (0);
+		return (1);
 
-	frame = webkit_web_view_get_main_frame(t->wv);
-	uri = (char *)webkit_web_frame_get_uri(frame);
+	if ((uri = get_uri(t->wv)) == NULL)
+		return (1);
+
 	dom = find_domain(uri, 1);
 	d = wl_find(dom, &c_wl);
 	if (d == NULL)
@@ -2135,13 +2151,12 @@ int
 toggle_js(struct tab *t, struct karg *args)
 {
 	int			es;
-	WebKitWebFrame		*frame;
 	const gchar		*uri;
 	struct domain		*d;
 	char			*dom = NULL, *dom_toggle = NULL;
 
 	if (args == NULL)
-		return (0);
+		return (1);
 
 	g_object_get(G_OBJECT(t->settings),
 	    "enable-scripts", &es, (char *)NULL);
@@ -2152,10 +2167,11 @@ toggle_js(struct tab *t, struct karg *args)
 	else if ((args->i & XT_WL_DISABLE) && es != 0)
 		es = 0;
 	else
-		return (0);
+		return (1);
 
-	frame = webkit_web_view_get_main_frame(t->wv);
-	uri = (char *)webkit_web_frame_get_uri(frame);
+	if ((uri = get_uri(t->wv)) == NULL)
+		return (1);
+
 	dom = find_domain(uri, 1);
 	if (uri == NULL || dom == NULL) {
 		show_oops(t, "Can't toggle domain in JavaScript white list");
@@ -2591,7 +2607,7 @@ done:
 }
 
 int
-connect_socket_from_uri(char *uri, char *domain, size_t domain_sz)
+connect_socket_from_uri(const gchar *uri, char *domain, size_t domain_sz)
 {
 	SoupURI			*su = NULL;
 	struct addrinfo		hints, *res = NULL, *ai;
@@ -2787,8 +2803,8 @@ done:
 int
 load_compare_cert(struct tab *t, struct karg *args)
 {
-	WebKitWebFrame		*frame;
-	char			*uri, domain[8182], file[PATH_MAX];
+	const gchar		*uri;
+	char			domain[8182], file[PATH_MAX];
 	char			cert_buf[64 * 1024], r_cert_buf[64 * 1024];
 	int			s = -1, rv = 1, i;
 	size_t			cert_count;
@@ -2801,8 +2817,9 @@ load_compare_cert(struct tab *t, struct karg *args)
 	if (t == NULL)
 		return (1);
 
-	frame = webkit_web_view_get_main_frame(t->wv);
-	uri = (char *)webkit_web_frame_get_uri(frame);
+	if ((uri = get_uri(t->wv)) == NULL)
+		return (1);
+
 	if ((s = connect_socket_from_uri(uri, domain, sizeof domain)) == -1)
 		return (1);
 
@@ -2855,8 +2872,8 @@ done:
 int
 cert_cmd(struct tab *t, struct karg *args)
 {
-	WebKitWebFrame		*frame;
-	char			*uri, *action, domain[8182];
+	const gchar		*uri;
+	char			*action, domain[8182];
 	int			s = -1;
 	size_t			cert_count;
 	gnutls_session_t	gsession;
@@ -2871,12 +2888,11 @@ cert_cmd(struct tab *t, struct karg *args)
 	else
 		action = "show";
 
-	frame = webkit_web_view_get_main_frame(t->wv);
-	uri = (char *)webkit_web_frame_get_uri(frame);
-	if (uri && strlen(uri) == 0) {
+	if ((uri = get_uri(t->wv)) == NULL) {
 		show_oops(t, "Invalid URI");
 		return (1);
 	}
+
 	if ((s = connect_socket_from_uri(uri, domain, sizeof domain)) == -1) {
 		show_oops(t, "Invalid certidicate URI: %s", uri);
 		return (1);
@@ -2989,7 +3005,7 @@ wl_show(struct tab *t, char *args, char *title, struct domain_list *wl)
 			if (d->handy == 1)
 				continue;
 			tmp = body;
-			body = g_strdup_printf("%s%s", body, d->d);
+			body = g_strdup_printf("%s%s<br>", body, d->d);
 			g_free(tmp);
 		}
 	}
@@ -3010,8 +3026,8 @@ wl_save(struct tab *t, struct karg *args, int js)
 	FILE			*f;
 	char			*line = NULL, *lt = NULL;
 	size_t			linelen;
-	WebKitWebFrame		*frame;
-	char			*dom = NULL, *uri, *dom_save = NULL;
+	const gchar		*uri;
+	char			*dom = NULL, *dom_save = NULL;
 	struct karg		a;
 	struct domain		*d;
 	GSList			*cf;
@@ -3028,8 +3044,7 @@ wl_save(struct tab *t, struct karg *args, int js)
 	if ((f = fopen(file, "r+")) == NULL)
 		return (1);
 
-	frame = webkit_web_view_get_main_frame(t->wv);
-	uri = (char *)webkit_web_frame_get_uri(frame);
+	uri = get_uri(t->wv);
 	dom = find_domain(uri, 1);
 	if (uri == NULL || dom == NULL) {
 		show_oops(t, "Can't add domain to %s white list",
@@ -3174,7 +3189,6 @@ add_favorite(struct tab *t, struct karg *args)
 	FILE			*f;
 	char			*line = NULL;
 	size_t			urilen, linelen;
-	WebKitWebFrame		*frame;
 	const gchar		*uri, *title;
 
 	if (t == NULL)
@@ -3194,8 +3208,8 @@ add_favorite(struct tab *t, struct karg *args)
 	}
 
 	title = webkit_web_view_get_title(t->wv);
-	frame = webkit_web_view_get_main_frame(t->wv);
-	uri = webkit_web_frame_get_uri(frame);
+	uri = get_uri(t->wv);
+
 	if (title == NULL)
 		title = uri;
 
@@ -3206,10 +3220,14 @@ add_favorite(struct tab *t, struct karg *args)
 
 	urilen = strlen(uri);
 
-	while (!feof(f)) {
-		line = fparseln(f, &linelen, NULL, NULL, 0);
+	for (;;) {
+		if ((line = fparseln(f, &linelen, NULL, NULL, 0)) == NULL)
+			if (feof(f) || ferror(f))
+				break;
+
 		if (linelen == urilen && !strcmp(line, uri))
 			goto done;
+
 		free(line);
 		line = NULL;
 	}
@@ -3239,7 +3257,7 @@ navaction(struct tab *t, struct karg *args)
 		else
 			item = webkit_web_back_forward_list_get_forward_item(t->bfl);
 		if (item == NULL)
-			return (XT_CB_PASSTHROUGH);;
+			return (XT_CB_PASSTHROUGH);
 		webkit_web_view_load_uri(t->wv, webkit_web_history_item_get_uri(item));
 		t->item = NULL;
 		return (XT_CB_PASSTHROUGH);
@@ -3378,6 +3396,30 @@ statusbar_set_visibility(void)
 	}
 }
 
+void
+url_set(struct tab *t, int enable_url_entry)
+{
+	GdkPixbuf	*pixbuf;
+	int 		progress;
+
+	show_url = enable_url_entry;
+
+	if (enable_url_entry) {
+		gtk_entry_set_icon_from_icon_name(GTK_ENTRY(t->statusbar),
+		    GTK_ENTRY_ICON_PRIMARY, NULL);
+		gtk_entry_set_progress_fraction(GTK_ENTRY(t->statusbar), 0);
+	} else {
+		pixbuf = gtk_entry_get_icon_pixbuf(GTK_ENTRY(t->uri_entry),
+		    GTK_ENTRY_ICON_PRIMARY);
+		progress =
+		    gtk_entry_get_progress_fraction(GTK_ENTRY(t->uri_entry));
+		gtk_entry_set_icon_from_pixbuf(GTK_ENTRY(t->statusbar),
+		    GTK_ENTRY_ICON_PRIMARY, pixbuf);
+		gtk_entry_set_progress_fraction(GTK_ENTRY(t->statusbar),
+		    progress);
+	}
+}
+
 int
 fullscreen(struct tab *t, struct karg *args)
 {
@@ -3386,10 +3428,13 @@ fullscreen(struct tab *t, struct karg *args)
 	if (t == NULL)
 		return (XT_CB_PASSTHROUGH);
 
-	if (show_url == 0)
-		show_url = show_tabs = 1;
-	else
-		show_url = show_tabs = 0;
+	if (show_url == 0) {
+		url_set(t, 1);
+		show_tabs = 1;
+	} else {
+		url_set(t, 0);
+		show_tabs = 0;
+	}
 
 	url_set_visibility();
 	notebook_tab_set_visibility(notebook);
@@ -3437,13 +3482,13 @@ urlaction(struct tab *t, struct karg *args)
 	switch (args->i) {
 	case XT_URL_SHOW:
 		if (show_url == 0) {
-			show_url = 1;
+			url_set(t, 1);
 			url_set_visibility();
 		}
 		break;
 	case XT_URL_HIDE:
 		if (show_url == 1) {
-			show_url = 0;
+			url_set(t, 0);
 			url_set_visibility();
 		}
 		break;
@@ -3488,7 +3533,7 @@ tabaction(struct tab *t, struct karg *args)
 			rv = XT_CB_PASSTHROUGH;
 			goto done;
 		}
-		load_uri(t->wv, url);
+		load_uri(t, url);
 		break;
 	case XT_TAB_SHOW:
 		if (show_tabs == 0) {
@@ -3621,7 +3666,6 @@ movetab(struct tab *t, struct karg *args)
 int
 command(struct tab *t, struct karg *args)
 {
-	WebKitWebFrame		*frame;
 	char			*s = NULL, *ss = NULL;
 	GdkColor		color;
 	const gchar		*uri;
@@ -3653,9 +3697,7 @@ command(struct tab *t, struct karg *args)
 	case XT_CMD_TABNEW_CURRENT:
 		if (!s) /* FALL THROUGH? */
 			s = ":tabnew ";
-		frame = webkit_web_view_get_main_frame(t->wv);
-		uri = webkit_web_frame_get_uri(frame);
-		if (uri && strlen(uri)) {
+		if ((uri = get_uri(t->wv)) != NULL) {
 			ss = g_strdup_printf("%s%s", s, uri);
 			s = ss;
 		}
@@ -3834,7 +3876,8 @@ xtp_page_cl(struct tab *t, struct karg *args)
 	int			i = 1; /* all ids start 1 */
 	GSList			*sc, *pc, *pc_start;
 	SoupCookie		*c;
-	char			*type;
+	char			*type, *table_headers;
+	char			*last_domain = strdup("");
 
 	DNPRINTF(XT_D_CMD, "%s", __func__);
 
@@ -3854,24 +3897,42 @@ xtp_page_cl(struct tab *t, struct karg *args)
 	  "\n<head><title>Cookie Jar</title>\n" XT_PAGE_STYLE
 	  "</head><body><h1>Cookie Jar</h1>\n");
 
-	/* body */
-	body = g_strdup_printf("<div align='center'><table><tr>"
+	/* table headers */
+	table_headers = g_strdup_printf("<div align='center'><table><tr>"
 	    "<th>Type</th>"
 	    "<th>Name</th>"
 	    "<th>Value</th>"
-	    "<th>Domain</th>"
 	    "<th>Path</th>"
 	    "<th>Expires</th>"
 	    "<th>Secure</th>"
-	    "<th>HTTP_only</th>"
-	    "<th>Remove</th></tr>\n");
+	    "<th>HTTP<br />only</th>"
+	    "<th>Rm</th></tr>\n");
 
 	sc = soup_cookie_jar_all_cookies(s_cookiejar);
 	pc = soup_cookie_jar_all_cookies(p_cookiejar);
 	pc_start = pc;
 
+	body = NULL;
 	for (; sc; sc = sc->next) {
 		c = sc->data;
+
+                if (strcmp(last_domain, c->domain) != 0) {
+                        /* new domain */
+                        free(last_domain);
+                        last_domain = strdup(c->domain);
+
+                        if (body != NULL) {
+                                tmp = body;
+                                body = g_strdup_printf("%s</table></div>"
+                                    "<h2>%s</h2>%s\n",
+                                    body, c->domain, table_headers);
+                                g_free(tmp);
+                        } else {
+                                /* first domain */
+                                body = g_strdup_printf("<h2>%s</h2>%s\n",
+                                    c->domain, table_headers);
+                        }
+                }
 
 		type = "Session";
 		for (pc = pc_start; pc; pc = pc->next)
@@ -3883,24 +3944,24 @@ xtp_page_cl(struct tab *t, struct karg *args)
 		tmp = body;
 		body = g_strdup_printf(
 		    "%s\n<tr>"
-		    "<td style='width: 3%%; text-align: center'>%s</td>"
-		    "<td style='width: 10%%; word-break: break-all'>%s</td>"
-		    "<td style='width: 20%%; word-break: break-all'>%s</td>"
-		    "<td style='width: 10%%; word-break: break-all'>%s</td>"
-		    "<td style='width: 8%%; word-break: break-all'>%s</td>"
-		    "<td style='width: 12%%; word-break: break-all'>%s</td>"
-		    "<td style='width: 3%%; text-align: center'>%d</td>"
-		    "<td style='width: 3%%; text-align: center'>%d</td>"
-		    "<td style='width: 3%%; text-align: center'>"
+		    "<td style='width: text-align: center'>%s</td>"
+		    "<td style='width: 1px'>%s</td>"
+		    "<td style='width=70%%;overflow: visible'>"
+		    "  <textarea rows='4'>%s</textarea>"
+		    "</td>"
+		    "<td>%s</td>"
+		    "<td>%s</td>"
+		    "<td style='width: 1px; text-align: center'>%d</td>"
+		    "<td style='width: 1px; text-align: center'>%d</td>"
+		    "<td style='width: 1px; text-align: center'>"
 		    "<a href='%s%d/%s/%d/%d'>X</a></td></tr>\n",
 		    body,
 		    type,
 		    c->name,
 		    c->value,
-		    c->domain,
 		    c->path,
 		    c->expires ?
-		        soup_date_to_string(c->expires, SOUP_DATE_HTTP) : "",
+		        soup_date_to_string(c->expires, SOUP_DATE_COOKIE) : "",
 		    c->secure,
 		    c->http_only,
 
@@ -3920,10 +3981,8 @@ xtp_page_cl(struct tab *t, struct karg *args)
 
 	/* small message if there are none */
 	if (i == 1) {
-		tmp = body;
 		body = g_strdup_printf("%s\n<tr><td style='text-align:center'"
-		    "colspan='8'>No Cookies</td></tr>\n", body);
-		g_free(tmp);
+		    "colspan='8'>No Cookies</td></tr>\n", table_headers);
 	}
 
 	/* footer */
@@ -3934,6 +3993,8 @@ xtp_page_cl(struct tab *t, struct karg *args)
 	g_free(header);
 	g_free(body);
 	g_free(footer);
+	g_free(table_headers);
+	g_free(last_domain);
 
 	load_webkit_string(t, page);
 	update_cookie_tabs(t);
@@ -4385,7 +4446,7 @@ print_page(struct tab *t, struct karg *args)
 int
 go_home(struct tab *t, struct karg *args)
 {
-	load_uri(t->wv, home);
+	load_uri(t, home);
 	return (0);
 }
 
@@ -4442,10 +4503,10 @@ struct key_binding {
 	{ "focussearch",	0,	0,	GDK_F7,		focus,		{.i = XT_FOCUS_SEARCH} },
 
 	/* command aliases (handy when -S flag is used) */
-	{ NULL,	0,		0,	GDK_F9,		command,	{.i = XT_CMD_OPEN} },
-	{ NULL,	0,		0,	GDK_F10,	command,	{.i = XT_CMD_OPEN_CURRENT} },
-	{ NULL,	0,		0,	GDK_F11,	command,	{.i = XT_CMD_TABNEW} },
-	{ NULL,	0,		0,	GDK_F12,	command,	{.i = XT_CMD_TABNEW_CURRENT} },
+	{ NULL,			0,	0,	GDK_F9,		command,	{.i = XT_CMD_OPEN} },
+	{ NULL,			0,	0,	GDK_F10,	command,	{.i = XT_CMD_OPEN_CURRENT} },
+	{ NULL,			0,	0,	GDK_F11,	command,	{.i = XT_CMD_TABNEW} },
+	{ NULL,			0,	0,	GDK_F12,	command,	{.i = XT_CMD_TABNEW_CURRENT} },
 
 	/* hinting */
 	{ "hinting",		0,	0,	GDK_f,		hint,		{.i = 0} },
@@ -5079,7 +5140,7 @@ activate_uri_entry_cb(GtkWidget* entry, struct tab *t)
 
 	/* if xxxt:// treat specially */
 	if (!parse_xtp_url(t, uri)) {
-		load_uri(t->wv, (gchar *)uri);
+		load_uri(t, (gchar *)uri);
 		focus_webview(t);
 	}
 }
@@ -5115,7 +5176,7 @@ activate_search_entry_cb(GtkWidget* entry, struct tab *t)
 }
 
 void
-check_and_set_js(gchar *uri, struct tab *t)
+check_and_set_js(const gchar *uri, struct tab *t)
 {
 	struct domain		*d = NULL;
 	int			es = 0;
@@ -5227,6 +5288,35 @@ free_favicon(struct tab *t)
 }
 
 void
+xt_icon_from_name(struct tab *t, gchar *name)
+{
+	gtk_entry_set_icon_from_icon_name(GTK_ENTRY(t->uri_entry),
+	    GTK_ENTRY_ICON_PRIMARY, "text-html");
+	if (show_url == 0) {
+		gtk_entry_set_icon_from_icon_name(GTK_ENTRY(t->statusbar),
+		    GTK_ENTRY_ICON_PRIMARY, "text-html");
+	} else {
+		gtk_entry_set_icon_from_icon_name(GTK_ENTRY(t->statusbar),
+		    GTK_ENTRY_ICON_PRIMARY, NULL);
+	}
+	return;
+}
+
+void
+xt_icon_from_pixbuf(struct tab *t, GdkPixbuf *pixbuf)
+{
+	gtk_entry_set_icon_from_pixbuf(GTK_ENTRY(t->uri_entry),
+	    GTK_ENTRY_ICON_PRIMARY, pixbuf);
+	if (show_url == 0) {
+		gtk_entry_set_icon_from_pixbuf(GTK_ENTRY(t->statusbar),
+		    GTK_ENTRY_ICON_PRIMARY, pixbuf);
+	} else {
+		gtk_entry_set_icon_from_icon_name(GTK_ENTRY(t->statusbar),
+		    GTK_ENTRY_ICON_PRIMARY, NULL);
+	}
+}
+
+void
 abort_favicon_download(struct tab *t)
 {
 	DNPRINTF(XT_D_DOWNLOAD, "%s: down %p\n", __func__, t->icon_download);
@@ -5236,8 +5326,7 @@ abort_favicon_download(struct tab *t)
 	else
 		free_favicon(t);
 
-	gtk_entry_set_icon_from_icon_name(GTK_ENTRY(t->uri_entry),
-	    GTK_ENTRY_ICON_PRIMARY, "text-html");
+	xt_icon_from_name(t, "text-html");
 }
 
 void
@@ -5271,8 +5360,7 @@ set_favicon_from_file(struct tab *t, char *file)
 
 	pixbuf = gdk_pixbuf_new_from_file(file, NULL);
 	if (pixbuf == NULL) {
-		gtk_entry_set_icon_from_icon_name(GTK_ENTRY(t->uri_entry),
-		    GTK_ENTRY_ICON_PRIMARY, "text-html");
+		xt_icon_from_name(t, "text-html");
 		return;
 	}
 
@@ -5295,8 +5383,7 @@ set_favicon_from_file(struct tab *t, char *file)
 	}
 
 	t->icon_pixbuf = scaled;
-	gtk_entry_set_icon_from_pixbuf(GTK_ENTRY(t->uri_entry),
-	    GTK_ENTRY_ICON_PRIMARY, t->icon_pixbuf);
+	xt_icon_from_pixbuf(t, t->icon_pixbuf);
 }
 
 void
@@ -5403,7 +5490,6 @@ notify_icon_loaded_cb(WebKitWebView *wv, gchar *uri, struct tab *t)
 void
 notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 {
-	WebKitWebFrame		*frame;
 	const gchar		*set = NULL, *uri = NULL, *title = NULL;
 	struct history		*h, find;
 	int			add = 0;
@@ -5434,23 +5520,20 @@ notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 
 	case WEBKIT_LOAD_COMMITTED:
 		/* 1 */
-		frame = webkit_web_view_get_main_frame(wview);
-		uri = webkit_web_frame_get_uri(frame);
-		if (uri) {
+		if ((uri = get_uri(wview)) != NULL) {
 			gtk_entry_set_text(GTK_ENTRY(t->uri_entry), uri);
 
 			if (t->status) {
 				g_free(t->status);
 				t->status = NULL;
 			}
-			set_status(t, (char *)uri, XT_STATUS_URI);
+			set_status(t, (char *)uri, XT_STATUS_LOADING);
 		}
 
 		/* check if js white listing is enabled */
 		if (enable_js_whitelist) {
-			frame = webkit_web_view_get_main_frame(wview);
-			uri = webkit_web_frame_get_uri(frame);
-			check_and_set_js((gchar *)uri, t);
+			uri = get_uri(wview);
+			check_and_set_js(uri, t);
 		}
 
 		show_ca_status(t, uri);
@@ -5465,8 +5548,7 @@ notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 	case WEBKIT_LOAD_FIRST_VISUALLY_NON_EMPTY_LAYOUT:
 		/* 3 */
 		title = webkit_web_view_get_title(wview);
-		frame = webkit_web_view_get_main_frame(wview);
-		uri = webkit_web_frame_get_uri(frame);
+		uri = get_uri(wview);
 		if (title)
 			set = title;
 		else if (uri)
@@ -5503,6 +5585,8 @@ notify_load_status_cb(WebKitWebView* wview, GParamSpec* pspec, struct tab *t)
 
 	case WEBKIT_LOAD_FINISHED:
 		/* 2 */
+		uri = get_uri(wview);
+		set_status(t, (char *)uri, XT_STATUS_URI);
 #if WEBKIT_CHECK_VERSION(1, 1, 18)
 	case WEBKIT_LOAD_FAILED:
 		/* 4 */
@@ -5544,6 +5628,10 @@ webview_progress_changed_cb(WebKitWebView *wv, int progress, struct tab *t)
 {
 	gtk_entry_set_progress_fraction(GTK_ENTRY(t->uri_entry),
 	    progress == 100 ? 0 : (double)progress / 100);
+	if (show_url == 0) {
+		gtk_entry_set_progress_fraction(GTK_ENTRY(t->statusbar),
+		    progress == 100 ? 0 : (double)progress / 100);
+	}
 }
 
 int
@@ -5884,9 +5972,9 @@ anum:
 
 	struct key_binding	*k;
 	TAILQ_FOREACH(k, &kbl, entry)
-		 if (e->keyval == k->key){
-			if(k->mask == 0){
-				if((e->state & (CTRL|MOD1)) == 0){
+		if (e->keyval == k->key) {
+			if (k->mask == 0) {
+				if ((e->state & (CTRL | MOD1)) == 0) {
 					k->func(t, &k->arg);
 					return (XT_CB_HANDLED);
 				}
@@ -6005,9 +6093,9 @@ entry_key_cb(GtkEntry *w, GdkEventKey *e, struct tab *t)
 
 	struct key_binding	*k;
 	TAILQ_FOREACH(k, &kbl, entry)
-		if (e->keyval == k->key && k->use_in_entry){
-			if(k->mask==0){
-				if((e->state & (CTRL|MOD1)) == 0){
+		if (e->keyval == k->key && k->use_in_entry) {
+			if (k->mask == 0) {
+				if ((e->state & (CTRL | MOD1)) == 0) {
 					k->func(t, &k->arg);
 					return (XT_CB_HANDLED);
 				}
@@ -6334,15 +6422,11 @@ create_toolbar(struct tab *t)
 	g_signal_connect(G_OBJECT(t->uri_entry), "activate",
 	    G_CALLBACK(activate_uri_entry_cb), t);
 	g_signal_connect(G_OBJECT(t->uri_entry), "key-press-event",
-	    (GCallback)entry_key_cb, t);
+	    G_CALLBACK(entry_key_cb), t);
 	eb1 = gtk_hbox_new(FALSE, 0);
 	gtk_container_set_border_width(GTK_CONTAINER(eb1), 1);
 	gtk_box_pack_start(GTK_BOX(eb1), t->uri_entry, TRUE, TRUE, 0);
 	gtk_box_pack_start(GTK_BOX(b), eb1, TRUE, TRUE, 0);
-
-	/* set empty favicon */
-	gtk_entry_set_icon_from_icon_name(GTK_ENTRY(t->uri_entry),
-	    GTK_ENTRY_ICON_PRIMARY, "text-html");
 
 	/* search entry */
 	if (fancy_bar && search_string) {
@@ -6352,7 +6436,7 @@ create_toolbar(struct tab *t)
 		g_signal_connect(G_OBJECT(t->search_entry), "activate",
 		    G_CALLBACK(activate_search_entry_cb), t);
 		g_signal_connect(G_OBJECT(t->search_entry), "key-press-event",
-		    (GCallback)entry_key_cb, t);
+		    G_CALLBACK(entry_key_cb), t);
 		gtk_widget_set_size_request(t->search_entry, -1, -1);
 		eb2 = gtk_hbox_new(FALSE, 0);
 		gtk_container_set_border_width(GTK_CONTAINER(eb2), 1);
@@ -6378,14 +6462,10 @@ undo_close_tab_save(struct tab *t)
 	int				m, n;
 	const gchar			*uri;
 	struct undo			*u1, *u2;
-	WebKitWebFrame			*frame;
 	GList				*items;
 	WebKitWebHistoryItem		*item;
 
-	frame = webkit_web_view_get_main_frame(t->wv);
-	uri = webkit_web_frame_get_uri(frame);
-
-	if (uri && !strlen(uri))
+	if ((uri = get_uri(t->wv)) == NULL)
 		return (1);
 
 	u1 = g_malloc0(sizeof(struct undo));
@@ -6585,6 +6665,9 @@ create_new_tab(char *title, struct undo *u, int focus)
 	/* xtp meaning is normal by default */
 	t->xtp_meaning = XT_XTP_TAB_MEANING_NORMAL;
 
+	/* set empty favicon */
+	xt_icon_from_name(t, "text-html");
+
 	/* and show it all */
 	gtk_widget_show_all(b);
 	gtk_widget_show_all(t->vbox);
@@ -6619,40 +6702,40 @@ create_new_tab(char *title, struct undo *u, int focus)
 	gtk_notebook_set_tab_reorderable(notebook, t->vbox, TRUE);
 
 	g_object_connect(G_OBJECT(t->cmd),
-	    "signal::key-press-event", (GCallback)cmd_keypress_cb, t,
-	    "signal::key-release-event", (GCallback)cmd_keyrelease_cb, t,
-	    "signal::focus-out-event", (GCallback)cmd_focusout_cb, t,
-	    "signal::activate", (GCallback)cmd_activate_cb, t,
+	    "signal::key-press-event", G_CALLBACK(cmd_keypress_cb), t,
+	    "signal::key-release-event", G_CALLBACK(cmd_keyrelease_cb), t,
+	    "signal::focus-out-event", G_CALLBACK(cmd_focusout_cb), t,
+	    "signal::activate", G_CALLBACK(cmd_activate_cb), t,
 	    (char *)NULL);
 
 	/* reuse wv_button_cb to hide oops */
 	g_object_connect(G_OBJECT(t->oops),
-	    "signal::button_press_event", (GCallback)wv_button_cb, t,
+	    "signal::button_press_event", G_CALLBACK(wv_button_cb), t,
 	    (char *)NULL);
 
 	g_object_connect(G_OBJECT(t->wv),
-	    "signal::key-press-event", (GCallback)wv_keypress_cb, t,
-	    "signal-after::key-press-event", (GCallback)wv_keypress_after_cb, t,
-	    "signal::hovering-over-link", (GCallback)webview_hover_cb, t,
-	    "signal::download-requested", (GCallback)webview_download_cb, t,
-	    "signal::mime-type-policy-decision-requested", (GCallback)webview_mimetype_cb, t,
-	    "signal::navigation-policy-decision-requested", (GCallback)webview_npd_cb, t,
-	    "signal::new-window-policy-decision-requested", (GCallback)webview_nw_cb, t,
-	    "signal::create-web-view", (GCallback)webview_cwv_cb, t,
-	    "signal::event", (GCallback)webview_event_cb, t,
-	    "signal::load-finished", (GCallback)webview_load_finished_cb, t,
-	    "signal::load-progress-changed", (GCallback)webview_progress_changed_cb, t,
+	    "signal::key-press-event", G_CALLBACK(wv_keypress_cb), t,
+	    "signal-after::key-press-event", G_CALLBACK(wv_keypress_after_cb), t,
+	    "signal::hovering-over-link", G_CALLBACK(webview_hover_cb), t,
+	    "signal::download-requested", G_CALLBACK(webview_download_cb), t,
+	    "signal::mime-type-policy-decision-requested", G_CALLBACK(webview_mimetype_cb), t,
+	    "signal::navigation-policy-decision-requested", G_CALLBACK(webview_npd_cb), t,
+	    "signal::new-window-policy-decision-requested", G_CALLBACK(webview_nw_cb), t,
+	    "signal::create-web-view", G_CALLBACK(webview_cwv_cb), t,
+	    "signal::event", G_CALLBACK(webview_event_cb), t,
+	    "signal::load-finished", G_CALLBACK(webview_load_finished_cb), t,
+	    "signal::load-progress-changed", G_CALLBACK(webview_progress_changed_cb), t,
 #if WEBKIT_CHECK_VERSION(1, 1, 18)
-	    "signal::icon-loaded", (GCallback)notify_icon_loaded_cb, t,
+	    "signal::icon-loaded", G_CALLBACK(notify_icon_loaded_cb), t,
 #endif
-	    "signal::button_press_event", (GCallback)wv_button_cb, t,
+	    "signal::button_press_event", G_CALLBACK(wv_button_cb), t,
 	    (char *)NULL);
 	g_signal_connect(t->wv,
 	    "notify::load-status", G_CALLBACK(notify_load_status_cb), t);
 
 	/* hijack the unused keys as if we were the browser */
 	g_object_connect(G_OBJECT(t->toolbar),
-	    "signal-after::key-press-event", (GCallback)wv_keypress_after_cb, t,
+	    "signal-after::key-press-event", G_CALLBACK(wv_keypress_after_cb), t,
 	    (char *)NULL);
 
 	g_signal_connect(G_OBJECT(bb), "button_press_event",
@@ -6670,9 +6753,10 @@ create_new_tab(char *title, struct undo *u, int focus)
 		    t->tab_id);
 	}
 
-	if (load)
-		load_uri(t->wv, title);
-	else {
+	if (load) {
+		gtk_entry_set_text(GTK_ENTRY(t->uri_entry), title);
+		load_uri(t, title);
+	} else {
 		if (show_url == 1)
 			gtk_widget_grab_focus(GTK_WIDGET(t->uri_entry));
 		else
@@ -6738,7 +6822,6 @@ arrow_cb(GtkWidget *w, GdkEventButton *event, gpointer user_data)
 {
 	GtkWidget		*menu, *menu_items;
 	GdkEventButton		*bevent;
-	WebKitWebFrame		*frame;
 	const gchar		*uri;
 	struct tab		*ti;
 
@@ -6747,13 +6830,9 @@ arrow_cb(GtkWidget *w, GdkEventButton *event, gpointer user_data)
 		menu = gtk_menu_new();
 
 		TAILQ_FOREACH(ti, &tabs, entry) {
-			frame = webkit_web_view_get_main_frame(ti->wv);
-			uri = webkit_web_frame_get_uri(frame);
-			/* XXX make sure there is something to print */
-			/* XXX add gui pages in here to look purdy */
-			if (uri == NULL)
-				uri = "(untitled)";
-			if (strlen(uri) == 0)
+			if ((uri = get_uri(ti->wv)) == NULL)
+				/* XXX make sure there is something to print */
+				/* XXX add gui pages in here to look purdy */
 				uri = "(untitled)";
 			menu_items = gtk_menu_item_new_with_label(uri);
 			gtk_menu_append(GTK_MENU (menu), menu_items);
@@ -6859,7 +6938,7 @@ create_canvas(void)
 	gtk_widget_set_size_request(vbox, -1, -1);
 
 	g_object_connect(G_OBJECT(notebook),
-	    "signal::switch-page", (GCallback)notebook_switchpage_cb, NULL,
+	    "signal::switch-page", G_CALLBACK(notebook_switchpage_cb), NULL,
 	    (char *)NULL);
 	g_signal_connect(G_OBJECT(abtn), "button_press_event",
 	    G_CALLBACK(arrow_cb), NULL);
@@ -6983,8 +7062,10 @@ soup_cookie_jar_add_cookie(SoupCookieJar *jar, SoupCookie *cookie)
 		    "soup_cookie_jar_add_cookie: reject %s\n",
 		    cookie->domain);
 		if (save_rejected_cookies) {
-			if ((r_cookie_f = fopen(rc_fname, "a+")) == NULL)
+			if ((r_cookie_f = fopen(rc_fname, "a+")) == NULL) {
 				show_oops_s("can't open reject cookie file");
+				return;
+			}
 			fseek(r_cookie_f, 0, SEEK_END);
 			fprintf(r_cookie_f, "%s%s\t%s\t%s\t%s\t%lu\t%s\t%s\n",
 			    cookie->http_only ? "#HttpOnly_" : "",

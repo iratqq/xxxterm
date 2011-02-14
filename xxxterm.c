@@ -1,4 +1,4 @@
-/* $xxxterm: xxxterm.c,v 1.314 2011/02/09 10:12:55 stevan Exp $ */
+/* $xxxterm: xxxterm.c,v 1.315 2011/02/13 22:44:07 marco Exp $ */
 /*
  * Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2011 Stevan Andjelkovic <stevan@student.chalmers.se>
@@ -97,7 +97,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-static char		*version = "$xxxterm: xxxterm.c,v 1.314 2011/02/09 10:12:55 stevan Exp $";
+static char		*version = "$xxxterm: xxxterm.c,v 1.315 2011/02/13 22:44:07 marco Exp $";
 
 /* hooked functions */
 void		(*_soup_cookie_jar_add_cookie)(SoupCookieJar *, SoupCookie *);
@@ -492,6 +492,7 @@ time_t		session_autosave = 0;
 struct settings;
 struct key_binding;
 int		set_download_dir(struct settings *, char *);
+int		set_work_dir(struct settings *, char *);
 int		set_runtime_dir(struct settings *, char *);
 int		set_browser_mode(struct settings *, char *);
 int		set_cookie_policy(struct settings *, char *);
@@ -507,6 +508,7 @@ char		*get_browser_mode(struct settings *);
 char		*get_cookie_policy(struct settings *);
 
 char		*get_download_dir(struct settings *);
+char		*get_work_dir(struct settings *);
 char		*get_runtime_dir(struct settings *);
 
 void		walk_alias(struct settings *, void (*)(struct settings *, char *, void *), void *);
@@ -569,6 +571,12 @@ struct special		s_download_dir = {
 	NULL
 };
 
+struct special		s_work_dir = {
+	set_work_dir,
+	get_work_dir,
+	NULL
+};
+
 struct settings {
 	char		*name;
 	int		type;
@@ -622,6 +630,7 @@ struct settings {
 	{ "user_stylesheet",		XT_S_STR, 0, NULL,	&user_stylesheet, NULL },
 	{ "window_height",		XT_S_INT, 0,		&window_height, NULL, NULL },
 	{ "window_width",		XT_S_INT, 0,		&window_width, NULL, NULL },
+	{ "work_dir",			XT_S_STR, 0, NULL, NULL,&s_work_dir },
 
 	/* runtime settings */
 	{ "alias",			XT_S_STR, XT_SF_RUNTIME, NULL, NULL, &s_alias },
@@ -996,6 +1005,26 @@ domain_rb_cmp(struct domain *d1, struct domain *d2)
 	return (strcmp(d1->d, d2->d));
 }
 RB_GENERATE(domain_list, domain, entry, domain_rb_cmp);
+
+char *
+get_work_dir(struct settings *s)
+{
+	if (work_dir[0] == '\0')
+		return (0);
+	return (g_strdup(work_dir));
+}
+
+int
+set_work_dir(struct settings *s, char *val)
+{
+	if (val[0] == '~')
+		snprintf(work_dir, sizeof work_dir, "%s/%s",
+		    pwd->pw_dir, &val[1]);
+	else
+		strlcpy(work_dir, val, sizeof work_dir);
+
+	return (0);
+}
 
 /*
  * generate a session key to secure xtp commands.
@@ -1785,8 +1814,7 @@ restore_global_history(void)
 	gchar			*uri;
 	gchar			*title;
 
-	snprintf(file, sizeof file, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_HISTORY_FILE);
+	snprintf(file, sizeof file, "%s/%s", work_dir, XT_HISTORY_FILE);
 
 	if ((f = fopen(file, "r")) == NULL) {
 		warnx("%s: fopen", __func__);
@@ -1834,8 +1862,7 @@ save_global_history_to_disk(struct tab *t)
 	FILE			*f;
 	struct history		*h;
 
-	snprintf(file, sizeof file, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_HISTORY_FILE);
+	snprintf(file, sizeof file, "%s/%s", work_dir, XT_HISTORY_FILE);
 
 	if ((f = fopen(file, "w")) == NULL) {
 		show_oops(t, "%s: global history file: %s",
@@ -2409,8 +2436,7 @@ xtp_page_fl(struct tab *t, struct karg *args)
 		generate_xtp_session_key(&fl_session_key);
 
 	/* open favorites */
-	snprintf(file, sizeof file, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_FAVS_FILE);
+	snprintf(file, sizeof file, "%s/%s", work_dir, XT_FAVS_FILE);
 	if ((f = fopen(file, "r")) == NULL) {
 		show_oops(t, "Can't open favorites file: %s", strerror(errno));
 		return (1);
@@ -3200,8 +3226,7 @@ add_favorite(struct tab *t, struct karg *args)
 		return (1);
 	}
 
-	snprintf(file, sizeof file, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_FAVS_FILE);
+	snprintf(file, sizeof file, "%s/%s", work_dir, XT_FAVS_FILE);
 	if ((f = fopen(file, "r+")) == NULL) {
 		show_oops(t, "Can't open favorites file: %s", strerror(errno));
 		return (1);
@@ -4930,8 +4955,7 @@ remove_favorite(struct tab *t, int index)
 	size_t			len, lineno;
 
 	/* open favorites */
-	snprintf(file, sizeof file, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_FAVS_FILE);
+	snprintf(file, sizeof file, "%s/%s", work_dir, XT_FAVS_FILE);
 
 	if ((f = fopen(file, "r")) == NULL) {
 		show_oops(t, "%s: can't open favorites: %s",
@@ -7175,8 +7199,8 @@ send_url_to_socket(char *url)
 	}
 
 	sa.sun_family = AF_UNIX;
-	snprintf(sa.sun_path, sizeof(sa.sun_path), "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_SOCKET_FILE);
+	snprintf(sa.sun_path, sizeof(sa.sun_path), "%s/%s",
+	    work_dir, XT_SOCKET_FILE);
 	len = SUN_LEN(&sa);
 
 	if (connect(s, (struct sockaddr *)&sa, len) == -1) {
@@ -7243,8 +7267,8 @@ is_running(void)
 	}
 
 	sa.sun_family = AF_UNIX;
-	snprintf(sa.sun_path, sizeof(sa.sun_path), "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_SOCKET_FILE);
+	snprintf(sa.sun_path, sizeof(sa.sun_path), "%s/%s",
+	    work_dir, XT_SOCKET_FILE);
 	len = SUN_LEN(&sa);
 
 	/* connect to see if there is a listener */
@@ -7270,8 +7294,8 @@ build_socket(void)
 	}
 
 	sa.sun_family = AF_UNIX;
-	snprintf(sa.sun_path, sizeof(sa.sun_path), "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_SOCKET_FILE);
+	snprintf(sa.sun_path, sizeof(sa.sun_path), "%s/%s",
+	    work_dir, XT_SOCKET_FILE);
 	len = SUN_LEN(&sa);
 
 	/* connect to see if there is a listener */
@@ -7403,7 +7427,9 @@ main(int argc, char *argv[])
 	config_parse(conf, 0);
 
 	/* working directory */
-	snprintf(work_dir, sizeof work_dir, "%s/%s", pwd->pw_dir, XT_DIR);
+	if (strlen(work_dir) == 0)
+		snprintf(work_dir, sizeof work_dir, "%s/%s",
+		    pwd->pw_dir, XT_DIR);
 	if (stat(work_dir, &sb)) {
 		if (mkdir(work_dir, S_IRWXU) == -1)
 			err(1, "mkdir work_dir");
@@ -7419,8 +7445,7 @@ main(int argc, char *argv[])
 	}
 
 	/* icon cache dir */
-	snprintf(cache_dir, sizeof cache_dir, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_CACHE_DIR);
+	snprintf(cache_dir, sizeof cache_dir, "%s/%s", work_dir, XT_CACHE_DIR);
 	if (stat(cache_dir, &sb)) {
 		if (mkdir(cache_dir, S_IRWXU) == -1)
 			err(1, "mkdir cache_dir");
@@ -7436,8 +7461,7 @@ main(int argc, char *argv[])
 	}
 
 	/* certs dir */
-	snprintf(certs_dir, sizeof certs_dir, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_CERT_DIR);
+	snprintf(certs_dir, sizeof certs_dir, "%s/%s", work_dir, XT_CERT_DIR);
 	if (stat(certs_dir, &sb)) {
 		if (mkdir(certs_dir, S_IRWXU) == -1)
 			err(1, "mkdir certs_dir");
@@ -7453,8 +7477,8 @@ main(int argc, char *argv[])
 	}
 
 	/* sessions dir */
-	snprintf(sessions_dir, sizeof sessions_dir, "%s/%s/%s",
-	    pwd->pw_dir, XT_DIR, XT_SESSIONS_DIR);
+	snprintf(sessions_dir, sizeof sessions_dir, "%s/%s",
+	    work_dir, XT_SESSIONS_DIR);
 	if (stat(sessions_dir, &sb)) {
 		if (mkdir(sessions_dir, S_IRWXU) == -1)
 			err(1, "mkdir sessions_dir");

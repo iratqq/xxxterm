@@ -1,4 +1,4 @@
-# $xxxterm: Makefile,v 1.4 2011/01/19 16:19:40 marco Exp $
+# $xxxterm: Makefile,v 1.6 2011/03/02 12:20:06 marco Exp $
 
 LIBS= gtk+-2.0 webkit-1.0 libsoup-2.4
 
@@ -18,8 +18,8 @@ CC?= cc
 all: ../javascript.h xxxterm
 
 ../javascript.h: ../js-merge-helper.pl ../hinting.js
-	perl ../js-merge-helper.pl ../hinting.js \
-		../input-focus.js > ../javascript.h
+	perl ../js-merge-helper.pl ../hinting.js ../input-focus.js > \
+	../javascript.h
 
 xxxterm.o: ../xxxterm.o
 

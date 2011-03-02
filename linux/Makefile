@@ -1,9 +1,9 @@
-# $xxxterm: Makefile,v 1.5 2011/01/04 10:29:32 marco Exp $
+# $xxxterm: Makefile,v 1.8 2011/03/02 12:20:06 marco Exp $
 
-LIBS= gtk+-2.0 webkit-1.0 libsoup-2.4
+LIBS= gtk+-2.0 webkit-1.0 libsoup-2.4 gnutls
 
 CFLAGS+= -Wall -ggdb -D_GNU_SOURCE -I. $(shell pkg-config --cflags $(LIBS))
-LDADD+= $(shell pkg-config --libs $(LIBS)) -lbsd
+LDADD+= $(shell pkg-config --libs $(LIBS)) -lbsd -ldl
 
 PREFIX?= /usr/local
 BINDIR?= $(PREFIX)/bin
@@ -15,8 +15,8 @@ CC?= gcc
 all: javascript.h xxxterm
 
 javascript.h: ../js-merge-helper.pl ../hinting.js
-	perl ../js-merge-helper.pl ../hinting.js \
-		../input-focus.js > javascript.h
+	perl ../js-merge-helper.pl ../hinting.js ../input-focus.js > \
+	javascript.h
 
 xxxterm.o: javascript.h
 

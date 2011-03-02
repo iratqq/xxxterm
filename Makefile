@@ -1,4 +1,4 @@
-# $xxxterm: Makefile,v 1.13 2011/01/10 22:19:40 marco Exp $
+# $xxxterm: Makefile,v 1.17 2011/03/02 12:20:06 marco Exp $
 
 PREFIX?=/usr/local
 BINDIR=${PREFIX}/bin
@@ -21,7 +21,7 @@ LDFLAGS+= $(GTK_LDFLAGS) -pthread
 
 MANDIR= ${PREFIX}/man/cat
 
-CLEANFILES += javascript.h
+CLEANFILES += ${.CURDIR}/javascript.h
 
 ${.CURDIR}/javascript.h: hinting.js input-focus.js
 	perl ${.CURDIR}/js-merge-helper.pl ${.CURDIR}/hinting.js \
@@ -34,7 +34,11 @@ beforeinstall:
 	cp ${.CURDIR}/xxxtermicon48.png ${PREFIX}/share/xxxterm
 	cp ${.CURDIR}/xxxtermicon64.png ${PREFIX}/share/xxxterm
 	cp ${.CURDIR}/xxxtermicon128.png ${PREFIX}/share/xxxterm
+	cp ${.CURDIR}/style.css ${PREFIX}/share/xxxterm
 
 ${PROG} ${OBJS} beforedepend: ${.CURDIR}/javascript.h
+
+release: xxxterm xxxterm.cat1
+	@sh ${.CURDIR}/release.sh ${.CURDIR}
 
 .include <bsd.prog.mk>

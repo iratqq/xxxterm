@@ -1,4 +1,4 @@
-.\"	$xxxterm: xxxterm.1,v 1.87 2011/02/28 02:44:03 marco Exp $
+.\"	$xxxterm: xxxterm.1,v 1.93 2011/03/17 21:58:06 marco Exp $
 .\"
 .\" Copyright (c) 2010, 2011 Marco Peereboom <marco@peereboom.us>
 .\" Copyright (c) 2011 Jason McIntyre <jmc@openbsd.org>
@@ -15,7 +15,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: February 28 2011 $
+.Dd $Mdocdate: March 17 2011 $
 .Dt XXXTERM 1
 .Os
 .Sh NAME
@@ -60,6 +60,15 @@ for each specified URL.
 This option requires
 .Cm enable_socket
 to be enabled.
+.It Fl e Ar command
+Execute arbitrary command (see the
+.Sx COMMAND MODE
+section below) in a running
+.Nm
+instance. This option requires
+.Cm enable_socket
+to be enabled. Example run: xxxterm -e "tabnew openbsd.org"; xxxterm -e
+tabclose; xxxterm -e wq.
 .It Fl S
 Disable the toolbar.
 .It Fl s Ar session_name
@@ -154,8 +163,10 @@ These commands are used to search for text strings within a web page.
 .Bl -tag -width Ds -offset indent -compact
 .It Cm /
 Start a search
+.Pq Cm search
 .It Cm \&?
 Start a backwards search
+.Pq Cm searchb
 .It Cm n
 Next item matching search
 .Pq Cm searchnext
@@ -185,12 +196,16 @@ option is used.
 .Bl -tag -width Ds -offset indent -compact
 .It Cm F9
 Alias for ":open"
+.Pq Cm promptopen
 .It Cm F10
 Alias for ":open current-uri"
+.Pq Cm promptopencurrent
 .It Cm F11
 Alias for ":tabnew"
+.Pq Cm prompttabnew
 .It Cm F12
 Alias for ":tabnew current-uri"
+.Pq Cm prompttabnewcurrent
 .El
 .Ss Navigation Commands
 These commands allow the user to navigate web pages and,
@@ -242,13 +257,13 @@ Page far left
 .Pq Cm scrollfarleft
 .It Cm M-f
 Favorites
-.Pq Cm favorites
+.Pq Cm fav
 .It Cm M-j
 Cookie jar
-.Pq Cm cookiejar
+.Pq Cm cookies
 .It Cm M-d
 Download manager
-.Pq Cm downloadmgr
+.Pq Cm dl
 .It Cm C-p
 Print page
 .Pq Cm print
@@ -257,13 +272,13 @@ Global history
 .Pq Cm history
 .It Cm C-j
 Toggle Java Script enabled for FQDN
-.Pq Cm togglejs
+.Pq Cm js
 .It Cm C-s
 Toggle source view
 .Pq Cm togglesrc
 .It Cm M-c
 Toggle cookie enabled for FQDN
-.Pq Cm togglecookie
+.Pq Cm cookie
 .El
 .Ss Tab Manipulation
 .Nm
@@ -287,10 +302,10 @@ Undo close tab
 .Pq Cm tabundoclose
 .It Cm C-Left
 Go to the previous tab
-.Pq Cm tabgotoprev
+.Pq Cm tabprevious
 .It Cm C-Right
 Go to the next tab
-.Pq Cm tabgotonext
+.Pq Cm tabnext
 .It Cm C-[1..0]
 Jump to page
 .Ar N
@@ -336,7 +351,7 @@ Commands to exit the browser.
 .Bl -tag -width Ds -offset indent -compact
 .It Cm C-q
 Quit
-.Pq Cm quit
+.Pq Cm q!
 .El
 .Ss Low-Contrast Color Scheme
 This command toggles the page's style between the default CSS and a
@@ -345,6 +360,7 @@ low-contrast color scheme with light grey text on a dark grey background.
 .Bl -tag -width Ds -offset indent -compact
 .It Cm i
 Toggle the current tab's style.
+.Pq Cm userstyle
 .El
 .Sh COMMAND MODE
 Command mode works in a similar fashion to the
@@ -777,14 +793,32 @@ This is a Java Script whitelist item.
 See
 .Cm cookie_wl
 for semantics and more details.
+.It Cm max_connections
+The maximum number of connections that
+.Nm
+can open at once.
+.It Cm max_host_connections
+The maximum number of connections that
+.Nm
+can open at once to a given host.
 .It Cm mime_type
 Sets an action for a specific or default MIME type.
-For example, to download and view a pdf using kpdf set mime_type =
-application/pdf,kpdf.
-To set a default value use *, for example mime_type = video/*,mplayer.
+For example, to download and view a pdf using kpdf set
+.Pa mime_type = application/pdf,kpdf .
+To set a default value use *, for example,
+.Pa mime_type = video/*,mplayer .
 Note that the action is only passed the URL and not all applications are
-capable of downloading content and therefore one might have to create a wrapper
-script to download the content first.
+capable of dealing with a URL and therefore one might have to create a wrapper
+script to download the content first.  Alternatively one can add the
+.Pa @
+in front of the MIME type to indicate "download first".
+For example,
+.Pa mime_type = @application/pdf,xpdf .
+When
+.Pa @
+is use the file will be downloaded to the
+.Pa download_dir
+before the MIME handler is called.
 .It Cm read_only_cookies
 Mark cookies file read-only and discard all cookies once the session is
 terminated.
